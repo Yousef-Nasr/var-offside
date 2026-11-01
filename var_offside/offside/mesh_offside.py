@@ -101,12 +101,16 @@ class MeshOffsideCalculator:
         device: str = "cuda",
         margin_tolerance_m: float = 0.0,
         too_close_m: float = 0.30,
+        mesh_anchor: Optional[str] = None,
     ):
         self.device = device
         # Any positive margin flags offside (matches the reference pipeline);
         # raise this to require a minimum metric margin before flagging.
         self.margin_tolerance_m = margin_tolerance_m
         self.too_close_m = too_close_m
+        # None follows ``settings.offside.mesh_anchor`` at call time, so it can
+        # be switched between runs on one pipeline instance.
+        self.mesh_anchor = mesh_anchor
 
     # -- player selection ---------------------------------------------------
 
@@ -171,6 +175,12 @@ class MeshOffsideCalculator:
         """
         from var_offside.visualization.var_3d import VAR3DRenderer
 
+        anchor = self.mesh_anchor
+        if anchor is None:
+            from var_offside.config import get_settings
+
+            anchor = get_settings().offside.mesh_anchor
+
         rot = VAR3DRenderer._compute_upright_rotation(meshes)
         placed: Dict[int, Tuple[np.ndarray, np.ndarray]] = {}
 
@@ -179,7 +189,16 @@ class MeshOffsideCalculator:
             if idx >= len(detections):
                 continue
             det = detections[idx]
-            fp = project_detection_to_field(det, attacking_side, calibration)
+            if anchor == "center":
+                # Ground on the bbox bottom-centre, then measure the leading
+                # non-arm vertex.  Anchoring on the forward corner *and*
+                # measuring the forward vertex would count reach twice.
+                x1, _y1, x2, y2 = det.bbox
+                fp = calibration.project_to_field(
+                    ((float(x1) + float(x2)) / 2.0, float(y2))
+                )
+            else:
+                fp = project_detection_to_field(det, attacking_side, calibration)
             if fp is None:
                 continue
             wx = float(np.clip(fp[0] - _HALF_L, -_HALF_L, _HALF_L))

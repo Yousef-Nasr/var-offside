@@ -119,6 +119,14 @@ class OffsideConfig:
     field_length: float = 105.0
     field_width: float = 68.0
 
+    # Anchor for the 3D mesh method's ground point.
+    #   "directional" = current behaviour (foot centroid on the bbox forward
+    #                   corner).
+    #   "center" = foot centroid on the bbox bottom-centre ground point, then
+    #              the leading non-arm vertex is measured (avoids counting
+    #              forward reach twice).
+    mesh_anchor: str = "directional"
+
 
 @dataclass
 class VisualizationConfig:

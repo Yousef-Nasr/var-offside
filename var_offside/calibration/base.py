@@ -76,9 +76,10 @@ class CalibrationResult:
             and self.rotation_matrix is not None
             and self.position is not None
         ):
-            field_point = self._project_to_field_3d(point)
-            if field_point is not None:
-                return field_point
+            # With a full camera, a ray that misses the ground (above the
+            # horizon) has no field point.  Don't fall back to the ground
+            # homography: it would return the mirrored point behind the camera.
+            return self._project_to_field_3d(point)
 
         if self.homography is None:
             return None

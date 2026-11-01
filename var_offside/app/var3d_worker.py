@@ -16,6 +16,7 @@ import cv2
 from PyQt5.QtCore import QThread, pyqtSignal
 
 from var_offside.pipeline import AnalysisResult
+from var_offside.visualization.var_3d import RenderCancelled
 
 
 # Human-readable render modes -> entry function names
@@ -32,6 +33,7 @@ class Var3DWorker(QThread):
     progress = pyqtSignal(int, str)
     finished_ok = pyqtSignal(str)  # output video path
     error = pyqtSignal(str)
+    cancelled = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -41,6 +43,11 @@ class Var3DWorker(QThread):
         self._device: str = "cuda"
         self._temp_image: str = None
         self._orig_image_path: str = None
+        self._stop_requested = False
+
+    def request_stop(self):
+        """Ask a running render to stop before the next frame."""
+        self._stop_requested = True
 
     def setup(
         self,
@@ -53,6 +60,7 @@ class Var3DWorker(QThread):
         self._output_path = output_path
         self._mode = mode if mode in RENDER_MODES else "cinematic"
         self._device = device
+        self._stop_requested = False
 
     def run(self):
         try:
@@ -84,12 +92,15 @@ class Var3DWorker(QThread):
                 render_debug_3d_video,
             )
 
+            should_stop = lambda: self._stop_requested
+
             if self._mode == "zoomout":
                 out = render_zoomout_3d_video(
                     image_path=temp_path,
                     analysis_result=self._result,
                     output_path=self._output_path,
                     device=self._device,
+                    should_stop=should_stop,
                 )
             elif self._mode == "debug":
                 out = render_debug_3d_video(
@@ -97,6 +108,7 @@ class Var3DWorker(QThread):
                     analysis_result=self._result,
                     output_path=self._output_path,
                     device=self._device,
+                    should_stop=should_stop,
                 )
             else:
                 out = render_var_3d_video(
@@ -104,6 +116,7 @@ class Var3DWorker(QThread):
                     analysis_result=self._result,
                     output_path=self._output_path,
                     device=self._device,
+                    should_stop=should_stop,
                 )
 
             if not out or not os.path.isfile(out):
@@ -116,6 +129,8 @@ class Var3DWorker(QThread):
 
             self.progress.emit(100, "3D replay ready")
             self.finished_ok.emit(out)
+        except RenderCancelled:
+            self.cancelled.emit()
         except Exception as exc:  # noqa: BLE001 - surface any failure to the UI
             import traceback
 

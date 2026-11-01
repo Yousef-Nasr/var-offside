@@ -65,6 +65,7 @@ class MainWindow(QMainWindow):
         self._var3d_worker.progress.connect(self._on_progress)
         self._var3d_worker.finished_ok.connect(self._on_3d_ready)
         self._var3d_worker.error.connect(self._on_error)
+        self._var3d_worker.cancelled.connect(self._on_3d_cancelled)
 
         self._build_ui()
         self._build_toolbar()
@@ -270,6 +271,9 @@ class MainWindow(QMainWindow):
         if self._worker.isRunning():
             self._worker.request_stop()
             self.statusBar().showMessage("Stopping...")
+        if self._var3d_worker.isRunning():
+            self._var3d_worker.request_stop()
+            self.statusBar().showMessage("Stopping 3D replay...")
 
     def _action_save_current(self):
         img = self.stage_viewer.get_current_stage_image()
@@ -347,6 +351,11 @@ class MainWindow(QMainWindow):
                 "Playback",
                 f"Rendered to:\n{video_path}\n\nCould not open the player: {exc}",
             )
+
+    def _on_3d_cancelled(self):
+        """3D render was stopped by the user."""
+        self._set_running(False)
+        self.statusBar().showMessage("3D replay cancelled")
 
     def _action_edit_players(self):
         """Open the player editor dialog (available after phase 1)."""
@@ -516,6 +525,7 @@ class MainWindow(QMainWindow):
             self._worker.request_stop()
             self._worker.wait(3000)
         if self._var3d_worker.isRunning():
+            self._var3d_worker.request_stop()
             self._var3d_worker.wait(3000)
         self._video.release()
         super().closeEvent(event)

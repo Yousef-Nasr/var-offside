@@ -245,12 +245,36 @@ class PnLCalibration(BaseCalibration):
                 result.rotation_matrix = rotation
                 result.position = position
 
-                # Compute homography (image -> field ground plane)
-                # Use the homography for ground plane projection
-                result.homography = cam.homography
-                if result.homography is not None:
+                # Compute a true ground-plane homography from K/R/C instead of
+                # trusting the calibrator's internal (centred, Z-down) matrix.
+                # For ground points (Z=0) the camera projection reduces to
+                #   H_c = K @ [R[:,0], R[:,1], -R @ C]
+                # in PnL's centred world; compose with the absolute-field
+                # translation so H_field2img takes field metres (0-105, 0-68).
+                if K is not None and rotation is not None and position is not None:
                     try:
-                        result.homography_inv = np.linalg.inv(result.homography)
+                        H_c = K @ np.column_stack(
+                            [
+                                rotation[:, 0],
+                                rotation[:, 1],
+                                -(rotation @ position),
+                            ]
+                        )
+                        T = np.array(
+                            [
+                                [1.0, 0.0, -52.5],
+                                [0.0, 1.0, -34.0],
+                                [0.0, 0.0, 1.0],
+                            ],
+                            dtype=np.float64,
+                        )
+                        H_field2img = H_c @ T
+                        if abs(H_field2img[2, 2]) > 1e-10:
+                            H_field2img = H_field2img / H_field2img[2, 2]
+                            # base.py: homography maps image -> field (absolute
+                            # metres), homography_inv maps field -> image.
+                            result.homography_inv = H_field2img
+                            result.homography = np.linalg.inv(H_field2img)
                     except np.linalg.LinAlgError:
                         pass
 

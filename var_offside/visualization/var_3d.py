@@ -27,6 +27,26 @@ logging.getLogger("OpenGL.acceleratesupport").setLevel(logging.WARNING)
 
 logger = logging.getLogger(__name__)
 
+
+class RenderCancelled(Exception):
+    """Raised when a running 3D render is asked to stop."""
+
+
+class _CancellableWriter:
+    """Wrap a ``cv2.VideoWriter`` and stop before writing a frame on cancel."""
+
+    def __init__(self, writer, should_stop: Optional[Callable[[], bool]] = None):
+        self._writer = writer
+        self._should_stop = should_stop
+
+    def write(self, frame: np.ndarray) -> None:
+        if self._should_stop is not None and self._should_stop():
+            raise RenderCancelled("3D render cancelled")
+        self._writer.write(frame)
+
+    def release(self) -> None:
+        self._writer.release()
+
 # ---------------------------------------------------------------------------
 # SAM 3D Body helpers (avoid `from utils import ...` â€” collides with other
 # packages named "utils" on sys.path)
@@ -327,7 +347,7 @@ def _annotate_player_meshes(player_meshes: List[PlayerMesh], result) -> None:
 # checkpoint takes tens of seconds and a couple of GB of VRAM, so we keep one
 # per (checkpoint, device) and reuse it across every render in the process
 # (e.g. when the GUI generates several replays in one session).
-_ESTIMATOR_CACHE: Dict[Tuple[str, str], Any] = {}
+_ESTIMATOR_CACHE: Dict[Tuple[str, Optional[str], str, str], Any] = {}
 
 
 class MeshRecovery:
@@ -389,16 +409,23 @@ class MeshRecovery:
                 yolo = str(y2)
 
         mhr = self.mhr_path
-        if mhr and not os.path.isabs(mhr):
-            m2 = root / mhr
-            if m2.is_file():
-                mhr = str(m2)
+        if mhr:
+            if not os.path.isabs(mhr):
+                m2 = root / mhr
+                if m2.is_file():
+                    mhr = str(m2)
+            if not os.path.isfile(mhr):
+                raise FileNotFoundError(
+                    f"SAM 3D Body MHR model not found: {self.mhr_path!r}. "
+                    f"Expected it at {root / self.mhr_path}. "
+                    "Download it or set settings.var_3d.sam3d_mhr."
+                )
 
         return (
             ckpt,
             cfg if cfg and os.path.isfile(cfg) else None,
             yolo if yolo and os.path.isfile(yolo) else None,
-            mhr if mhr and os.path.isfile(mhr) else "",
+            mhr,
         )
 
     # Lazy init so import is fast; cached so the checkpoint loads only once.
@@ -406,8 +433,22 @@ class MeshRecovery:
         if self._estimator is not None:
             return
 
+        try:
+            import torch
+        except ImportError as exc:  # pragma: no cover - torch is required overall
+            raise RuntimeError(
+                "SAM 3D Body needs PyTorch with CUDA; torch is not importable."
+            ) from exc
+
+        if not str(self.device).startswith("cuda") or not torch.cuda.is_available():
+            raise RuntimeError(
+                f"SAM 3D Body needs a CUDA GPU (device={self.device!r}); "
+                "CUDA is not available or a non-CUDA device was requested. "
+                "Use a CUDA device or the 2D/proxy fallback."
+            )
+
         ckpt, cfg, yolo, mhr = self._resolve_paths()
-        cache_key = (ckpt, self.device)
+        cache_key = (ckpt, cfg, mhr, self.device)
         cached = _ESTIMATOR_CACHE.get(cache_key)
         if cached is not None:
             logger.debug("MeshRecovery: reusing cached estimator for %s", cache_key)
@@ -617,6 +658,7 @@ class VAR3DRenderer:
         attacking_side: Optional[str] = None,
         attacker_idx: Optional[int] = None,
         defender_idx: Optional[int] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
     ) -> str:
         """
         Render a multi-phase 3D VAR video.
@@ -636,273 +678,307 @@ class VAR3DRenderer:
         out_dir = os.path.dirname(output_path)
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
-        writer = cv2.VideoWriter(
+        raw_writer = cv2.VideoWriter(
             output_path,
             fourcc,
             self.fps,
             (self.video_width, self.video_height),
         )
-        if not writer.isOpened():
+        if not raw_writer.isOpened():
             raise RuntimeError(f"Could not open video writer for {output_path}")
+        writer = _CancellableWriter(raw_writer, should_stop)
 
-        # --- Phase durations ---
-        has_image = original_image is not None or annotated_image is not None
-        overlay_hold_sec = 3.0 if has_image else 0.0
-        transition_sec = 1.0 if has_image else 0.0
-        sweep_sec = max(self.duration_sec - overlay_hold_sec - transition_sec, 3.0)
+        renderer = None
+        try:
+            # --- Phase durations ---
+            has_image = original_image is not None or annotated_image is not None
+            overlay_hold_sec = 3.0 if has_image else 0.0
+            transition_sec = 1.0 if has_image else 0.0
+            sweep_sec = max(self.duration_sec - overlay_hold_sec - transition_sec, 3.0)
 
-        overlay_frames = int(overlay_hold_sec * self.fps)
-        transition_frames = int(transition_sec * self.fps)
-        sweep_frames = int(sweep_sec * self.fps)
+            overlay_frames = int(overlay_hold_sec * self.fps)
+            transition_frames = int(transition_sec * self.fps)
+            sweep_frames = int(sweep_sec * self.fps)
 
-        # ---- Phase 1: Original image with 3D mesh overlay ----
-        frame_overlay = None
-        if has_image:
-            base_img = original_image if original_image is not None else annotated_image
-            if base_img is not None:
-                frame_overlay = self._render_mesh_on_image(
-                    base_img,
-                    player_meshes,
+            # ---- Phase 1: Original image with 3D mesh overlay ----
+            frame_overlay = None
+            if has_image:
+                base_img = original_image if original_image is not None else annotated_image
+                if base_img is not None:
+                    frame_overlay = self._render_mesh_on_image(
+                        base_img,
+                        player_meshes,
+                        trimesh,
+                        pyrender,
+                        is_offside,
+                    )
+                    frame_overlay = self._resize_frame(frame_overlay)
+
+                logger.info(
+                    "Phase 1: Mesh overlay on original image (%d frames)", overlay_frames
+                )
+                if frame_overlay is not None:
+                    for _ in range(overlay_frames):
+                        writer.write(frame_overlay)
+
+            # ==================================================================
+            #  Build 3D pitch scene
+            #  Three calibration levels:
+            #    A) Full PnL (K + R + C) â†' real-world pitch, calibrated camera
+            #    B) Homography-only â†' real-world pitch, estimated camera
+            #    C) No calibration â†' SAM camera-space fallback
+            # ==================================================================
+
+            has_full_3d = (
+                calibration is not None
+                and calibration.has_3d_calibration
+                and calibration.camera_matrix is not None
+                and calibration.rotation_matrix is not None
+                and calibration.position is not None
+            )
+            has_homography = (
+                calibration is not None
+                and calibration.homography is not None
+                and not has_full_3d
+                and getattr(calibration, "method", None) != "vanishing_point"
+            )
+            z_up = has_full_3d or has_homography
+
+            fl = player_meshes[0].focal_length
+            img_w = player_meshes[0].image_width
+
+            scene = pyrender.Scene(
+                bg_color=np.array([0.03, 0.07, 0.04, 1.0]),  # dark stadium green
+                ambient_light=np.array([0.32, 0.34, 0.32]),
+            )
+
+            if has_full_3d:
+                logger.info("Using PnL 3D calibration (K/R/C) for pitch reconstruction")
+                cam_base_pose, cam_obj, focus_positions = self._build_scene_calibrated(
+                    scene,
                     trimesh,
                     pyrender,
+                    player_meshes,
+                    calibration,
+                    offside_x_norm,
                     is_offside,
+                    full_3d=True,
+                    offside_field_x=offside_field_x,
+                    attacking_side=attacking_side,
                 )
-                frame_overlay = self._resize_frame(frame_overlay)
+            elif has_homography:
+                logger.info("Using homography for pitch reconstruction (no K/R/C)")
+                cam_base_pose, cam_obj, focus_positions = self._build_scene_calibrated(
+                    scene,
+                    trimesh,
+                    pyrender,
+                    player_meshes,
+                    calibration,
+                    offside_x_norm,
+                    is_offside,
+                    full_3d=False,
+                    offside_field_x=offside_field_x,
+                    attacking_side=attacking_side,
+                )
+            else:
+                logger.info("No calibration â€” using SAM camera-space placement")
+                cam_base_pose, cam_obj, focus_positions = self._build_scene_cam_space(
+                    scene,
+                    trimesh,
+                    pyrender,
+                    player_meshes,
+                    offside_x_norm,
+                    is_offside,
+                    fl,
+                    img_w,
+                )
 
-            logger.info(
-                "Phase 1: Mesh overlay on original image (%d frames)", overlay_frames
+            # Grass mow-stripes so the pitch reads as a green grass rectangle.
+            if z_up:
+                self._add_pitch_stripes(scene, trimesh, pyrender)
+
+            # The calibrated broadcast camera (full PnL only): the 3D scene seen
+            # from it lines up with the original frame, so the crossfade starts
+            # there and then flies to the cinematic framing.
+            broadcast_pose = cam_base_pose.copy() if has_full_3d else None
+            broadcast_yfov = None
+            if has_full_3d:
+                K = np.asarray(calibration.camera_matrix, dtype=np.float64)
+                img_size = getattr(calibration, "image_size", None)
+                img_h = int(img_size[0]) if img_size and img_size[0] else int(K[1, 2] * 2)
+                s = min(self.video_width / img_w, self.video_height / max(img_h, 1))
+                broadcast_yfov = 2.0 * math.atan((self.video_height / 2.0) / (K[1, 1] * s))
+
+            cine_target = None
+            # Cinematic framing: view the offside wall from the attacking side,
+            # looking down the goal direction, so the wall is clearly visible.
+            if z_up and attacking_side in ("left", "right"):
+                cine = self._cinematic_camera_pose(
+                    offside_field_x,
+                    offside_x_norm,
+                    img_w,
+                    focus_positions,
+                    attacking_side,
+                    calibration,
+                    pyrender,
+                )
+                if cine is not None:
+                    cam_base_pose, cam_obj, cine_target = cine
+
+            cam_node = scene.add(cam_obj, pose=cam_base_pose)
+            renderer = pyrender.OffscreenRenderer(self.video_width, self.video_height)
+
+            def render_3d_frame(cam_pose: np.ndarray) -> np.ndarray:
+                scene.set_pose(cam_node, cam_pose)
+                color, _ = renderer.render(scene)
+                frame_bgr = cv2.cvtColor(color, cv2.COLOR_RGB2BGR)
+                self._add_var_overlay(frame_bgr, is_offside)
+                return frame_bgr
+
+            # Focus centre: orbit the point the cinematic camera frames, so the
+            # sweep does not jump away from the wall framing on its first frame.
+            if cine_target is not None:
+                centre = cine_target
+            elif focus_positions:
+                centre = np.mean(focus_positions, axis=0)
+            else:
+                centre = np.array([0.0, 0.0, 0.0])
+
+            fly_in = (
+                broadcast_pose is not None
+                and broadcast_yfov is not None
+                and cine_target is not None
             )
-            if frame_overlay is not None:
-                for _ in range(overlay_frames):
-                    writer.write(frame_overlay)
+            cine_yfov = cam_obj.yfov if fly_in else None
 
-        # ==================================================================
-        #  Build 3D pitch scene
-        #  Three calibration levels:
-        #    A) Full PnL (K + R + C) â†' real-world pitch, calibrated camera
-        #    B) Homography-only â†' real-world pitch, estimated camera
-        #    C) No calibration â†' SAM camera-space fallback
-        # ==================================================================
+            # ---- Phase 2: Crossfade from overlay into the 3D pitch ----
+            if transition_frames > 0 and has_image:
+                logger.info("Phase 2: Crossfade transition (%d frames)", transition_frames)
+                fallback_image = (
+                    annotated_image if annotated_image is not None else original_image
+                )
+                src = frame_overlay
+                if src is None and fallback_image is not None:
+                    src = self._resize_frame(fallback_image)
 
-        has_full_3d = (
-            calibration is not None
-            and calibration.has_3d_calibration
-            and calibration.camera_matrix is not None
-            and calibration.rotation_matrix is not None
-            and calibration.position is not None
-        )
-        has_homography = (
-            calibration is not None
-            and calibration.homography is not None
-            and not has_full_3d
-        )
-        z_up = has_full_3d or has_homography
+                for i in range(transition_frames):
+                    t = i / max(transition_frames - 1, 1)
+                    t_smooth = 0.5 - 0.5 * math.cos(t * math.pi)
 
-        fl = player_meshes[0].focal_length
-        img_w = player_meshes[0].image_width
+                    if fly_in:
+                        cam_obj.yfov = broadcast_yfov
+                        frame_3d = render_3d_frame(broadcast_pose)
+                    else:
+                        sweep_pose = self._compute_sweep_pose(
+                            cam_base_pose, centre, z_up, 0.0, t_smooth * 0.15
+                        )
+                        frame_3d = render_3d_frame(sweep_pose)
 
-        scene = pyrender.Scene(
-            bg_color=np.array([0.03, 0.07, 0.04, 1.0]),  # dark stadium green
-            ambient_light=np.array([0.32, 0.34, 0.32]),
-        )
+                    if src is not None:
+                        alpha = 0.5 - 0.5 * math.cos(t * math.pi)
+                        blended = cv2.addWeighted(src, 1.0 - alpha, frame_3d, alpha, 0)
+                        writer.write(blended)
+                    else:
+                        writer.write(frame_3d)
 
-        if has_full_3d:
-            logger.info("Using PnL 3D calibration (K/R/C) for pitch reconstruction")
-            cam_base_pose, cam_obj, focus_positions = self._build_scene_calibrated(
-                scene,
-                trimesh,
-                pyrender,
-                player_meshes,
-                calibration,
-                offside_x_norm,
-                is_offside,
-                full_3d=True,
-                offside_field_x=offside_field_x,
-                attacking_side=attacking_side,
-            )
-        elif has_homography:
-            logger.info("Using homography for pitch reconstruction (no K/R/C)")
-            cam_base_pose, cam_obj, focus_positions = self._build_scene_calibrated(
-                scene,
-                trimesh,
-                pyrender,
-                player_meshes,
-                calibration,
-                offside_x_norm,
-                is_offside,
-                full_3d=False,
-                offside_field_x=offside_field_x,
-                attacking_side=attacking_side,
-            )
-        else:
-            logger.info("No calibration â€” using SAM camera-space placement")
-            cam_base_pose, cam_obj, focus_positions = self._build_scene_cam_space(
-                scene,
-                trimesh,
-                pyrender,
-                player_meshes,
-                offside_x_norm,
-                is_offside,
-                fl,
-                img_w,
-            )
+            # ---- Phase 3: Camera sweep (broadcast â†' near-overhead) ----
+            logger.info("Phase 3: Camera sweep (%d frames)", sweep_frames)
 
-        # Grass mow-stripes so the pitch reads as a green grass rectangle.
-        if z_up:
-            self._add_pitch_stripes(scene, trimesh, pyrender)
+            # Fly from the broadcast camera down to the cinematic close-up.
+            fly_frames = 0
+            if fly_in:
+                fly_frames = int(sweep_frames * 0.4)
+                sweep_frames -= fly_frames
+                r0, r1 = broadcast_pose[:3, :3], cam_base_pose[:3, :3]
+                p0, p1 = broadcast_pose[:3, 3], cam_base_pose[:3, 3]
+                for i in range(fly_frames):
+                    t = i / max(fly_frames - 1, 1)
+                    t_smooth = 0.5 - 0.5 * math.cos(t * math.pi)
+                    pose = np.eye(4)
+                    pose[:3, :3] = _slerp_rotation(r0, r1, t_smooth)
+                    pose[:3, 3] = (1.0 - t_smooth) * p0 + t_smooth * p1
+                    cam_obj.yfov = (1.0 - t_smooth) * broadcast_yfov + t_smooth * cine_yfov
+                    writer.write(render_3d_frame(pose))
+                cam_obj.yfov = cine_yfov
 
-        # The calibrated broadcast camera (full PnL only): the 3D scene seen
-        # from it lines up with the original frame, so the crossfade starts
-        # there and then flies to the cinematic framing.
-        broadcast_pose = cam_base_pose.copy() if has_full_3d else None
-        broadcast_yfov = None
-        if has_full_3d:
-            K = np.asarray(calibration.camera_matrix, dtype=np.float64)
-            img_size = getattr(calibration, "image_size", None)
-            img_h = int(img_size[0]) if img_size and img_size[0] else int(K[1, 2] * 2)
-            s = min(self.video_width / img_w, self.video_height / max(img_h, 1))
-            broadcast_yfov = 2.0 * math.atan((self.video_height / 2.0) / (K[1, 1] * s))
-
-        cine_target = None
-        # Cinematic framing: view the offside wall from the attacking side,
-        # looking down the goal direction, so the wall is clearly visible.
-        if z_up and attacking_side in ("left", "right"):
-            cine = self._cinematic_camera_pose(
-                offside_field_x,
-                offside_x_norm,
-                img_w,
-                focus_positions,
-                attacking_side,
-                calibration,
-                pyrender,
-            )
-            if cine is not None:
-                cam_base_pose, cam_obj, cine_target = cine
-
-        cam_node = scene.add(cam_obj, pose=cam_base_pose)
-        renderer = pyrender.OffscreenRenderer(self.video_width, self.video_height)
-
-        def render_3d_frame(cam_pose: np.ndarray) -> np.ndarray:
-            scene.set_pose(cam_node, cam_pose)
-            color, _ = renderer.render(scene)
-            frame_bgr = cv2.cvtColor(color, cv2.COLOR_RGB2BGR)
-            self._add_var_overlay(frame_bgr, is_offside)
-            return frame_bgr
-
-        # Focus centre: orbit the point the cinematic camera frames, so the
-        # sweep does not jump away from the wall framing on its first frame.
-        if cine_target is not None:
-            centre = cine_target
-        elif focus_positions:
-            centre = np.mean(focus_positions, axis=0)
-        else:
-            centre = np.array([0.0, 0.0, 0.0])
-
-        fly_in = (
-            broadcast_pose is not None
-            and broadcast_yfov is not None
-            and cine_target is not None
-        )
-        cine_yfov = cam_obj.yfov if fly_in else None
-
-        # ---- Phase 2: Crossfade from overlay into the 3D pitch ----
-        if transition_frames > 0 and has_image:
-            logger.info("Phase 2: Crossfade transition (%d frames)", transition_frames)
-            fallback_image = (
-                annotated_image if annotated_image is not None else original_image
-            )
-            src = frame_overlay
-            if src is None and fallback_image is not None:
-                src = self._resize_frame(fallback_image)
-
-            for i in range(transition_frames):
-                t = i / max(transition_frames - 1, 1)
+            last_pose = cam_base_pose
+            last_frame = None
+            for i in range(sweep_frames):
+                t = i / max(sweep_frames - 1, 1)
                 t_smooth = 0.5 - 0.5 * math.cos(t * math.pi)
 
-                if fly_in:
-                    cam_obj.yfov = broadcast_yfov
-                    frame_3d = render_3d_frame(broadcast_pose)
-                else:
-                    sweep_pose = self._compute_sweep_pose(
-                        cam_base_pose, centre, z_up, 0.0, t_smooth * 0.15
+                # Sweep from 0Â° (start angle) toward a near-overhead view
+                # The lateral orbit is subtle (~15Â°), the main motion is pitching down
+                orbit_frac = t_smooth * 0.15
+                down_frac = t_smooth * 0.55
+
+                pose = self._compute_sweep_pose(
+                    cam_base_pose, centre, z_up, orbit_frac, down_frac
+                )
+                last_pose = pose
+                last_frame = render_3d_frame(pose)
+                writer.write(last_frame)
+
+            # ---- Phases 4-6: bird's-eye -> side-on along the line -> verdict ----
+            finale_frames = 0
+            if cine_target is not None and z_up:
+                finale_frames = self._render_finale(
+                    writer,
+                    scene,
+                    trimesh,
+                    pyrender,
+                    render_3d_frame,
+                    cam_obj,
+                    last_pose=last_pose,
+                    target=cine_target,
+                    focus_positions=focus_positions,
+                    calibration=calibration,
+                    attacking_side=attacking_side,
+                    is_offside=is_offside,
+                    attacker_idx=attacker_idx,
+                    defender_idx=defender_idx,
+                )
+            elif last_frame is not None:
+                # No full ending available (e.g. no attacking side): still
+                # reveal the verdict over the last rendered 3D frame.
+                assets = self._build_verdict_assets(
+                    is_offside, self._verdict_caption(is_offside, None)
+                )
+                n = int(2.8 * self.fps)
+                for i in range(n):
+                    frame = self._draw_verdict_reveal(
+                        last_frame, assets, i / self.fps
                     )
-                    frame_3d = render_3d_frame(sweep_pose)
+                    writer.write(frame)
+                    finale_frames += 1
 
-                if src is not None:
-                    alpha = 0.5 - 0.5 * math.cos(t * math.pi)
-                    blended = cv2.addWeighted(src, 1.0 - alpha, frame_3d, alpha, 0)
-                    writer.write(blended)
-                else:
-                    writer.write(frame_3d)
-
-        # ---- Phase 3: Camera sweep (broadcast â†' near-overhead) ----
-        logger.info("Phase 3: Camera sweep (%d frames)", sweep_frames)
-
-        # Fly from the broadcast camera down to the cinematic close-up.
-        fly_frames = 0
-        if fly_in:
-            fly_frames = int(sweep_frames * 0.4)
-            sweep_frames -= fly_frames
-            r0, r1 = broadcast_pose[:3, :3], cam_base_pose[:3, :3]
-            p0, p1 = broadcast_pose[:3, 3], cam_base_pose[:3, 3]
-            for i in range(fly_frames):
-                t = i / max(fly_frames - 1, 1)
-                t_smooth = 0.5 - 0.5 * math.cos(t * math.pi)
-                pose = np.eye(4)
-                pose[:3, :3] = _slerp_rotation(r0, r1, t_smooth)
-                pose[:3, 3] = (1.0 - t_smooth) * p0 + t_smooth * p1
-                cam_obj.yfov = (1.0 - t_smooth) * broadcast_yfov + t_smooth * cine_yfov
-                writer.write(render_3d_frame(pose))
-            cam_obj.yfov = cine_yfov
-
-        last_pose = cam_base_pose
-        for i in range(sweep_frames):
-            t = i / max(sweep_frames - 1, 1)
-            t_smooth = 0.5 - 0.5 * math.cos(t * math.pi)
-
-            # Sweep from 0Â° (start angle) toward a near-overhead view
-            # The lateral orbit is subtle (~15Â°), the main motion is pitching down
-            orbit_frac = t_smooth * 0.15
-            down_frac = t_smooth * 0.55
-
-            pose = self._compute_sweep_pose(
-                cam_base_pose, centre, z_up, orbit_frac, down_frac
+            total = (
+                overlay_frames
+                + transition_frames
+                + fly_frames
+                + sweep_frames
+                + finale_frames
             )
-            last_pose = pose
-            writer.write(render_3d_frame(pose))
-
-        # ---- Phases 4-6: bird's-eye -> side-on along the line -> verdict ----
-        finale_frames = 0
-        if cine_target is not None and z_up:
-            finale_frames = self._render_finale(
-                writer,
-                scene,
-                trimesh,
-                pyrender,
-                render_3d_frame,
-                cam_obj,
-                last_pose=last_pose,
-                target=cine_target,
-                focus_positions=focus_positions,
-                calibration=calibration,
-                attacking_side=attacking_side,
-                is_offside=is_offside,
-                attacker_idx=attacker_idx,
-                defender_idx=defender_idx,
+            logger.info(
+                "3D VAR video saved â†' %s  (%d frames, %.1fs)",
+                output_path,
+                total,
+                total / self.fps,
             )
-
-        writer.release()
-        renderer.delete()
-        total = (
-            overlay_frames + transition_frames + fly_frames + sweep_frames + finale_frames
-        )
-        logger.info(
-            "3D VAR video saved â†' %s  (%d frames, %.1fs)",
-            output_path,
-            total,
-            total / self.fps,
-        )
-        return output_path
+            return output_path
+        except RenderCancelled:
+            # Close the file first: Windows will not delete an open file.
+            writer.release()
+            if os.path.isfile(output_path):
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
+            raise
+        finally:
+            writer.release()
+            if renderer is not None:
+                renderer.delete()
 
     # ------------------------------------------------------------------
     # Finale: bird's-eye, side-on line view, verdict reveal
@@ -1290,6 +1366,8 @@ class VAR3DRenderer:
         original_image: Optional[np.ndarray] = None,
         calibration=None,
         detections=None,
+        offside_field_x: Optional[float] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
     ) -> str:
         """
         Render a 2D debug overlay video on the original broadcast image.
@@ -1306,70 +1384,83 @@ class VAR3DRenderer:
         out_dir = os.path.dirname(output_path)
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
-        writer = cv2.VideoWriter(
+        raw_writer = cv2.VideoWriter(
             output_path,
             fourcc,
             self.fps,
             (self.video_width, self.video_height),
         )
-        if not writer.isOpened():
+        if not raw_writer.isOpened():
             raise RuntimeError(f"Could not open video writer for {output_path}")
+        writer = _CancellableWriter(raw_writer, should_stop)
 
-        base_img, pitch_overlay, full_overlay = self._compose_debug_layers(
-            player_meshes,
-            offside_x_norm,
-            is_offside,
-            original_image=original_image,
-            calibration=calibration,
-            detections=detections,
-            expand_to_full_pitch=False,
-        )
-
-        def write_frame(frame: np.ndarray):
-            writer.write(self._resize_frame(frame))
-
-        p1 = int(2.0 * self.fps)
-        p2 = int(3.0 * self.fps)
-        p3 = int(2.0 * self.fps)
-        p4 = int(3.0 * self.fps)
-
-        # Phase 1: original image
-        logger.info("Debug Phase 1: Original image (%d frames)", p1)
-        for _ in range(p1):
-            write_frame(base_img)
-
-        # Phase 2: crossfade original -> pitch surface + lines + keypoints
-        logger.info("Debug Phase 2: Pitch overlay fade-in (%d frames)", p2)
-        for i in range(p2):
-            t = i / max(p2 - 1, 1)
-            alpha = 0.5 - 0.5 * math.cos(t * math.pi)
-            blended = cv2.addWeighted(base_img, 1.0 - alpha, pitch_overlay, alpha, 0)
-            write_frame(blended)
-
-        # Phase 3: crossfade pitch lines -> full overlay (meshes + line)
-        logger.info("Debug Phase 3: Meshes + line fade-in (%d frames)", p3)
-        for i in range(p3):
-            t = i / max(p3 - 1, 1)
-            alpha = 0.5 - 0.5 * math.cos(t * math.pi)
-            blended = cv2.addWeighted(
-                pitch_overlay, 1.0 - alpha, full_overlay, alpha, 0
+        try:
+            base_img, pitch_overlay, full_overlay = self._compose_debug_layers(
+                player_meshes,
+                offside_x_norm,
+                is_offside,
+                original_image=original_image,
+                calibration=calibration,
+                detections=detections,
+                expand_to_full_pitch=False,
+                offside_field_x=offside_field_x,
             )
-            write_frame(blended)
 
-        # Phase 4: hold
-        logger.info("Debug Phase 4: Hold complete overlay (%d frames)", p4)
-        for _ in range(p4):
-            write_frame(full_overlay)
+            def write_frame(frame: np.ndarray):
+                writer.write(self._resize_frame(frame))
 
-        writer.release()
-        total = p1 + p2 + p3 + p4
-        logger.info(
-            "Debug overlay video saved -> %s  (%d frames, %.1fs)",
-            output_path,
-            total,
-            total / self.fps,
-        )
-        return output_path
+            p1 = int(2.0 * self.fps)
+            p2 = int(3.0 * self.fps)
+            p3 = int(2.0 * self.fps)
+            p4 = int(3.0 * self.fps)
+
+            # Phase 1: original image
+            logger.info("Debug Phase 1: Original image (%d frames)", p1)
+            for _ in range(p1):
+                write_frame(base_img)
+
+            # Phase 2: crossfade original -> pitch surface + lines + keypoints
+            logger.info("Debug Phase 2: Pitch overlay fade-in (%d frames)", p2)
+            for i in range(p2):
+                t = i / max(p2 - 1, 1)
+                alpha = 0.5 - 0.5 * math.cos(t * math.pi)
+                blended = cv2.addWeighted(base_img, 1.0 - alpha, pitch_overlay, alpha, 0)
+                write_frame(blended)
+
+            # Phase 3: crossfade pitch lines -> full overlay (meshes + line)
+            logger.info("Debug Phase 3: Meshes + line fade-in (%d frames)", p3)
+            for i in range(p3):
+                t = i / max(p3 - 1, 1)
+                alpha = 0.5 - 0.5 * math.cos(t * math.pi)
+                blended = cv2.addWeighted(
+                    pitch_overlay, 1.0 - alpha, full_overlay, alpha, 0
+                )
+                write_frame(blended)
+
+            # Phase 4: hold
+            logger.info("Debug Phase 4: Hold complete overlay (%d frames)", p4)
+            for _ in range(p4):
+                write_frame(full_overlay)
+
+            total = p1 + p2 + p3 + p4
+            logger.info(
+                "Debug overlay video saved -> %s  (%d frames, %.1fs)",
+                output_path,
+                total,
+                total / self.fps,
+            )
+            return output_path
+        except RenderCancelled:
+            # Close the file first: Windows will not delete an open file.
+            writer.release()
+            if os.path.isfile(output_path):
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
+            raise
+        finally:
+            writer.release()
 
     def render_debug_image(
         self,
@@ -1380,6 +1471,7 @@ class VAR3DRenderer:
         original_image: Optional[np.ndarray] = None,
         calibration=None,
         detections=None,
+        offside_field_x: Optional[float] = None,
     ) -> str:
         """Render a zoomed-out debug still that includes the full projected pitch."""
         out_dir = os.path.dirname(output_path)
@@ -1394,6 +1486,7 @@ class VAR3DRenderer:
             calibration=calibration,
             detections=detections,
             expand_to_full_pitch=True,
+            offside_field_x=offside_field_x,
         )
         cv2.imwrite(output_path, full_overlay)
         logger.info("Debug overlay image saved -> %s", output_path)
@@ -1415,119 +1508,134 @@ class VAR3DRenderer:
         show_offside_line: bool = True,
         offside_field_x: Optional[float] = None,
         attacking_side: Optional[str] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
     ) -> str:
         """Render a zoom-out VAR video: broadcast overlay -> 3D bird's-eye pitch."""
         fourcc = cv2.VideoWriter_fourcc(*"mp4v")
         out_dir = os.path.dirname(output_path)
         if out_dir:
             os.makedirs(out_dir, exist_ok=True)
-        writer = cv2.VideoWriter(
+        raw_writer = cv2.VideoWriter(
             output_path,
             fourcc,
             self.fps,
             (self.video_width, self.video_height),
         )
-        if not writer.isOpened():
+        if not raw_writer.isOpened():
             raise RuntimeError(f"Could not open video writer for {output_path}")
+        writer = _CancellableWriter(raw_writer, should_stop)
 
-        base_img, pitch_overlay, full_overlay = self._compose_debug_layers(
-            player_meshes,
-            offside_x_norm,
-            is_offside,
-            original_image=original_image,
-            calibration=calibration,
-            detections=detections,
-            expand_to_full_pitch=False,
-        )
+        try:
+            base_img, pitch_overlay, full_overlay = self._compose_debug_layers(
+                player_meshes,
+                offside_x_norm,
+                is_offside,
+                original_image=original_image,
+                calibration=calibration,
+                detections=detections,
+                expand_to_full_pitch=False,
+                offside_field_x=offside_field_x,
+            )
 
-        logger.debug("Zoomout: debug layers composed, rendering 3D bird's-eye")
-        birds_eye_frames = self._render_birdseye_3d_frames(
-            player_meshes,
-            offside_x_norm,
-            is_offside,
-            calibration,
-            offside_field_x=offside_field_x,
-            attacking_side=attacking_side,
-        )
-        if birds_eye_frames is not None and len(birds_eye_frames) > 0:
-            birds_eye_final = birds_eye_frames[-1]
-            use_3d = True
-            logger.debug("Zoomout: got %d 3D frames", len(birds_eye_frames))
-        else:
-            logger.info("Zoomout: 3D bird's-eye unavailable, using 2D fallback")
-            birds_eye_final = self._draw_birdseye_pitch_fallback(
+            logger.debug("Zoomout: debug layers composed, rendering 3D bird's-eye")
+            birds_eye_frames = self._render_birdseye_3d_frames(
                 player_meshes,
                 offside_x_norm,
                 is_offside,
                 calibration,
+                offside_field_x=offside_field_x,
+                attacking_side=attacking_side,
+                should_stop=should_stop,
             )
-            use_3d = False
-
-        p1 = int(2.0 * self.fps)
-        p2 = int(2.0 * self.fps)
-        p3 = int(3.0 * self.fps)
-        p4 = int(3.0 * self.fps)
-
-        full_overlay_resized = self._resize_frame(full_overlay)
-        base_img_resized = self._resize_frame(base_img)
-
-        def write_frame(frame: np.ndarray):
-            writer.write(self._resize_frame(frame))
-
-        logger.info("Zoomout Phase 1: Original image (%d frames)", p1)
-        for _ in range(p1):
-            write_frame(base_img)
-
-        logger.info("Zoomout Phase 2: Overlay crossfade (%d frames)", p2)
-        for i in range(p2):
-            t = i / max(p2 - 1, 1)
-            alpha = 0.5 - 0.5 * math.cos(t * math.pi)
-            blended = cv2.addWeighted(
-                base_img_resized, 1.0 - alpha, full_overlay_resized, alpha, 0
-            )
-            write_frame(blended)
-
-        logger.info("Zoomout Phase 3: Transition to bird's-eye (%d frames)", p3)
-        if use_3d and birds_eye_frames is not None and len(birds_eye_frames) >= p3:
-            for i in range(p3):
-                t = i / max(p3 - 1, 1)
-                alpha = 0.5 - 0.5 * math.cos(t * math.pi)
-                idx_3d = min(
-                    int(t * (len(birds_eye_frames) - 1)), len(birds_eye_frames) - 1
+            if birds_eye_frames is not None and len(birds_eye_frames) > 0:
+                birds_eye_final = birds_eye_frames[-1]
+                use_3d = True
+                logger.debug("Zoomout: got %d 3D frames", len(birds_eye_frames))
+            else:
+                logger.info("Zoomout: 3D bird's-eye unavailable, using 2D fallback")
+                birds_eye_final = self._draw_birdseye_pitch_fallback(
+                    player_meshes,
+                    offside_x_norm,
+                    is_offside,
+                    calibration,
                 )
-                frame_3d = birds_eye_frames[idx_3d]
-                blended = cv2.addWeighted(
-                    full_overlay_resized, 1.0 - alpha, frame_3d, alpha, 0
-                )
-                write_frame(blended)
-        else:
-            birdseye_matched = cv2.resize(
-                birds_eye_final,
-                (full_overlay_resized.shape[1], full_overlay_resized.shape[0]),
-                interpolation=cv2.INTER_LINEAR,
-            )
-            for i in range(p3):
-                t = i / max(p3 - 1, 1)
+                use_3d = False
+
+            p1 = int(2.0 * self.fps)
+            p2 = int(2.0 * self.fps)
+            p3 = int(3.0 * self.fps)
+            p4 = int(3.0 * self.fps)
+
+            full_overlay_resized = self._resize_frame(full_overlay)
+            base_img_resized = self._resize_frame(base_img)
+
+            def write_frame(frame: np.ndarray):
+                writer.write(self._resize_frame(frame))
+
+            logger.info("Zoomout Phase 1: Original image (%d frames)", p1)
+            for _ in range(p1):
+                write_frame(base_img)
+
+            logger.info("Zoomout Phase 2: Overlay crossfade (%d frames)", p2)
+            for i in range(p2):
+                t = i / max(p2 - 1, 1)
                 alpha = 0.5 - 0.5 * math.cos(t * math.pi)
                 blended = cv2.addWeighted(
-                    full_overlay_resized, 1.0 - alpha, birdseye_matched, alpha, 0
+                    base_img_resized, 1.0 - alpha, full_overlay_resized, alpha, 0
                 )
                 write_frame(blended)
 
-        logger.info("Zoomout Phase 4: Hold bird's-eye (%d frames)", p4)
-        hold_frame = self._resize_frame(birds_eye_final)
-        for _ in range(p4):
-            writer.write(hold_frame)
+            logger.info("Zoomout Phase 3: Transition to bird's-eye (%d frames)", p3)
+            if use_3d and birds_eye_frames is not None and len(birds_eye_frames) >= p3:
+                for i in range(p3):
+                    t = i / max(p3 - 1, 1)
+                    alpha = 0.5 - 0.5 * math.cos(t * math.pi)
+                    idx_3d = min(
+                        int(t * (len(birds_eye_frames) - 1)), len(birds_eye_frames) - 1
+                    )
+                    frame_3d = birds_eye_frames[idx_3d]
+                    blended = cv2.addWeighted(
+                        full_overlay_resized, 1.0 - alpha, frame_3d, alpha, 0
+                    )
+                    write_frame(blended)
+            else:
+                birdseye_matched = cv2.resize(
+                    birds_eye_final,
+                    (full_overlay_resized.shape[1], full_overlay_resized.shape[0]),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+                for i in range(p3):
+                    t = i / max(p3 - 1, 1)
+                    alpha = 0.5 - 0.5 * math.cos(t * math.pi)
+                    blended = cv2.addWeighted(
+                        full_overlay_resized, 1.0 - alpha, birdseye_matched, alpha, 0
+                    )
+                    write_frame(blended)
 
-        writer.release()
-        total = p1 + p2 + p3 + p4
-        logger.info(
-            "Zoomout VAR video saved -> %s  (%d frames, %.1fs)",
-            output_path,
-            total,
-            total / self.fps,
-        )
-        return output_path
+            logger.info("Zoomout Phase 4: Hold bird's-eye (%d frames)", p4)
+            hold_frame = self._resize_frame(birds_eye_final)
+            for _ in range(p4):
+                writer.write(hold_frame)
+
+            total = p1 + p2 + p3 + p4
+            logger.info(
+                "Zoomout VAR video saved -> %s  (%d frames, %.1fs)",
+                output_path,
+                total,
+                total / self.fps,
+            )
+            return output_path
+        except RenderCancelled:
+            # Close the file first: Windows will not delete an open file.
+            writer.release()
+            if os.path.isfile(output_path):
+                try:
+                    os.remove(output_path)
+                except OSError:
+                    pass
+            raise
+        finally:
+            writer.release()
 
     def _render_birdseye_3d_frames(
         self,
@@ -1537,6 +1645,7 @@ class VAR3DRenderer:
         calibration,
         offside_field_x: Optional[float] = None,
         attacking_side: Optional[str] = None,
+        should_stop: Optional[Callable[[], bool]] = None,
     ) -> Optional[List[np.ndarray]]:
         """Render 3D bird's-eye pitch frames via pyrender.
 
@@ -1554,19 +1663,28 @@ class VAR3DRenderer:
             logger.warning("No calibration -- cannot render 3D bird's-eye")
             return None
 
+        has_full_3d = (
+            calibration.has_3d_calibration
+            and calibration.camera_matrix is not None
+            and calibration.rotation_matrix is not None
+            and calibration.position is not None
+        )
+        if not has_full_3d and getattr(calibration, "method", None) == "vanishing_point":
+            # The VP calibrator's homography is only a rough placeholder; a
+            # 3D reconstruction from it is meaningless.  Use the 2D fallback.
+            logger.info(
+                "Vanishing-point calibration has no 3D camera; "
+                "using 2D bird's-eye fallback"
+            )
+            return None
+
+        renderer = None
         try:
             half_l = self.PITCH_LENGTH / 2.0
             half_w = self.PITCH_WIDTH / 2.0
             scene = pyrender_mod.Scene(
                 bg_color=np.array([0.03, 0.07, 0.04, 1.0]),  # dark stadium green
                 ambient_light=np.array([0.32, 0.34, 0.32]),
-            )
-
-            has_full_3d = (
-                calibration.has_3d_calibration
-                and calibration.camera_matrix is not None
-                and calibration.rotation_matrix is not None
-                and calibration.position is not None
             )
 
             cam_base_pose, cam_obj, focus_positions = self._build_scene_calibrated(
@@ -1648,6 +1766,8 @@ class VAR3DRenderer:
             end_rot = over_pose[:3, :3].astype(np.float64)
 
             for i in range(num_frames):
+                if should_stop is not None and should_stop():
+                    raise RenderCancelled("3D render cancelled")
                 t = i / max(num_frames - 1, 1)
                 t_smooth = 0.5 - 0.5 * math.cos(t * math.pi)
 
@@ -1675,13 +1795,17 @@ class VAR3DRenderer:
                         num_frames,
                     )
 
-            renderer.delete()
             logger.info("Bird's-eye 3D rendering complete (%d frames)", len(frames))
             return frames
 
+        except RenderCancelled:
+            raise
         except Exception as exc:
             logger.warning("3D bird's-eye rendering failed: %s", exc, exc_info=True)
             return None
+        finally:
+            if renderer is not None:
+                renderer.delete()
 
     @staticmethod
     def _add_pitch_stripes(scene, trimesh, pyrender):
@@ -1857,6 +1981,7 @@ class VAR3DRenderer:
         calibration=None,
         detections=None,
         expand_to_full_pitch: bool = False,
+        offside_field_x: Optional[float] = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         """Build the base, pitch-only, and full debug overlays."""
         source_image = (
@@ -1890,8 +2015,17 @@ class VAR3DRenderer:
             image_scale=image_scale,
         )
 
-        trimesh = _require_trimesh()
-        pyrender = _require_pyrender()
+        # trimesh/pyrender are only needed by the OpenGL paths; the mesh
+        # overlay itself is pure OpenCV, so a missing GL stack must not block
+        # the debug view.
+        try:
+            trimesh = _require_trimesh()
+        except ImportError:
+            trimesh = None
+        try:
+            pyrender = _require_pyrender()
+        except ImportError:
+            pyrender = None
         mesh_img = self._render_mesh_on_image(
             pitch_overlay.copy(),
             player_meshes,
@@ -1910,6 +2044,7 @@ class VAR3DRenderer:
             source_image_shape=source_shape,
             image_offset=image_offset,
             image_scale=image_scale,
+            offside_field_x=offside_field_x,
         )
         if detections is not None:
             full_overlay = self._draw_detection_labels(
@@ -2370,6 +2505,7 @@ class VAR3DRenderer:
         source_image_shape: Optional[Tuple[int, int]] = None,
         image_offset: Tuple[int, int] = (0, 0),
         image_scale: float = 1.0,
+        offside_field_x: Optional[float] = None,
     ) -> np.ndarray:
         """Draw the offside line on the image."""
         output = image.copy()
@@ -2380,15 +2516,58 @@ class VAR3DRenderer:
         offside_pixel = offside_pixel_src * image_scale + offset_x
         line_color = (0, 0, 255) if is_offside else (0, 220, 0)
 
-        if calibration is not None and calibration.vanishing_point is not None:
+        def _extend_and_clip(
+            x0: float, y0: float, x1: float, y1: float
+        ) -> bool:
+            dx, dy = x1 - x0, y1 - y0
+            length = math.hypot(dx, dy)
+            if length < 1e-6:
+                return False
+            ux, uy = dx / length, dy / length
+            ext = math.hypot(w, h) * 4.0 + 1.0
+            pt1 = (int(round(x0 - ux * ext)), int(round(y0 - uy * ext)))
+            pt2 = (int(round(x0 + ux * ext)), int(round(y0 + uy * ext)))
+            ok, c1, c2 = cv2.clipLine((0, 0, w, h), pt1, pt2)
+            if not ok:
+                return False
+            cv2.line(output, c1, c2, line_color, 3)
+            return True
+
+        drawn = False
+        if (
+            offside_field_x is not None
+            and calibration is not None
+            and calibration.projection_matrix is not None
+        ):
+            # Metric offside line projected with the full camera: one line
+            # through the two field points (x, 0) and (x, pitch_width).
+            p0 = self._project_field_to_image_float(
+                calibration, (float(offside_field_x), 0.0)
+            )
+            p1 = self._project_field_to_image_float(
+                calibration, (float(offside_field_x), self.PITCH_WIDTH)
+            )
+            if p0 is not None and p1 is not None:
+                drawn = _extend_and_clip(
+                    p0[0] * image_scale + offset_x,
+                    p0[1] * image_scale + offset_y,
+                    p1[0] * image_scale + offset_x,
+                    p1[1] * image_scale + offset_y,
+                )
+
+        if (
+            not drawn
+            and calibration is not None
+            and calibration.vanishing_point is not None
+        ):
+            # Single perspective line through the VP and the offside reference
+            # point at the bottom of the image (replaces the old two-segment V).
             vx, vy = calibration.vanishing_point
             vx = vx * image_scale + offset_x
             vy = vy * image_scale + offset_y
-            line_x = int(offside_pixel)
-            # Draw full perspective line through bottom of image and vanishing point
-            cv2.line(output, (line_x, 0), (int(vx), int(vy)), line_color, 3)
-            cv2.line(output, (int(vx), int(vy)), (line_x, h), line_color, 3)
-        else:
+            drawn = _extend_and_clip(vx, vy, offside_pixel, float(h))
+
+        if not drawn:
             cv2.line(
                 output, (int(offside_pixel), 0), (int(offside_pixel), h), line_color, 3
             )
@@ -3693,6 +3872,7 @@ def render_var_3d_video(
     output_path: str = "results/offside_3d.mp4",
     device: str = "cuda",
     extra_player_bboxes: Optional[Dict[int, Tuple[float, float, float, float]]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> Optional[str]:
     """
     End-to-end: take an AnalysisResult, recover key player meshes, render
@@ -3844,7 +4024,10 @@ def render_var_3d_video(
             attacking_side=attacking_side,
             attacker_idx=most_adv.player_idx if most_adv is not None else None,
             defender_idx=def_idx,
+            should_stop=should_stop,
         )
+    except RenderCancelled:
+        raise
     except Exception as exc:
         logger.error("3D VAR rendering failed: %s", exc, exc_info=True)
         return None
@@ -3856,6 +4039,7 @@ def render_debug_3d_video(
     output_path: str = "results/debug_overlay.mp4",
     device: str = "cuda",
     extra_player_bboxes: Optional[Dict[int, Tuple[float, float, float, float]]] = None,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> Optional[str]:
     """
     Render a debug overlay video on the original broadcast image.
@@ -3969,6 +4153,7 @@ def render_debug_3d_video(
             original_image=source_image,
             calibration=result.calibration,
             detections=result.detections,
+            offside_field_x=line.field_x,
         )
         result.debug_3d_video_path = renderer.render_debug(
             player_meshes,
@@ -3978,8 +4163,12 @@ def render_debug_3d_video(
             original_image=source_image,
             calibration=result.calibration,
             detections=result.detections,
+            offside_field_x=line.field_x,
+            should_stop=should_stop,
         )
         return result.debug_3d_video_path
+    except RenderCancelled:
+        raise
     except Exception as exc:
         logger.error("Debug overlay rendering failed: %s", exc, exc_info=True)
         return None
@@ -3992,6 +4181,7 @@ def render_zoomout_3d_video(
     device: str = "cuda",
     extra_player_bboxes: Optional[Dict[int, Tuple[float, float, float, float]]] = None,
     show_offside_line: bool = True,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> Optional[str]:
     """
     Render a zoom-out VAR video with pitch overlay and 3D player meshes.
@@ -4112,7 +4302,10 @@ def render_zoomout_3d_video(
             show_offside_line=show_offside_line,
             offside_field_x=line.field_x,
             attacking_side=getattr(offside_res, "attacking_side", None),
+            should_stop=should_stop,
         )
+    except RenderCancelled:
+        raise
     except Exception as exc:
         logger.error("Zoomout VAR video rendering failed: %s", exc, exc_info=True)
         print(f"ERROR: Zoomout VAR video rendering failed: {exc}")
