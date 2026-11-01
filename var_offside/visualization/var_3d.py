@@ -1203,6 +1203,118 @@ class VAR3DRenderer:
             self._paste_rgba(out, sub, W * 0.5, cy, 1.0, a)
         return np.clip(out, 0, 255).astype(np.uint8)
 
+    # Non-arm MHR70 keypoints -> body-part label for the line-setting point.
+    _PART_NAMES = {
+        0: "HEAD", 1: "HEAD", 2: "HEAD", 3: "HEAD", 4: "HEAD", 69: "NECK",
+        5: "LEFT SHOULDER", 6: "RIGHT SHOULDER",
+        67: "LEFT SHOULDER", 68: "RIGHT SHOULDER",
+        9: "LEFT HIP", 10: "RIGHT HIP", 11: "LEFT KNEE", 12: "RIGHT KNEE",
+        13: "LEFT ANKLE", 14: "RIGHT ANKLE",
+        15: "LEFT FOOT", 16: "LEFT FOOT", 17: "LEFT HEEL",
+        18: "RIGHT FOOT", 19: "RIGHT FOOT", 20: "RIGHT HEEL",
+    }
+
+    def _line_setting_part(
+        self,
+        v_world: np.ndarray,
+        pm: PlayerMesh,
+        attacking_side: str,
+        trimesh,
+        pyrender,
+    ) -> Optional[Dict[str, Any]]:
+        """Glowing overlay for the defender's body part that sets the line.
+
+        The part is the non-arm vertex furthest toward the attacked goal; the
+        overlay copies the body surface within ~15 cm of it, lifted slightly
+        along the surface normal so it sits on top of the body.
+        """
+        mask = np.ones(len(v_world), bool)
+        try:
+            from var_offside.offside.mesh_offside import non_arm_mask
+
+            if len(pm.vertices) == len(v_world):
+                mask = non_arm_mask(pm.vertices, pm.keypoints_3d)
+        except Exception:  # noqa: BLE001 - fall back to the whole body
+            pass
+        idxs = np.nonzero(mask)[0]
+        if len(idxs) == 0:
+            return None
+        xs = v_world[idxs, 0]
+        k = int(idxs[np.argmin(xs) if attacking_side == "left" else np.argmax(xs)])
+        lead = v_world[k]
+
+        name = "BODY"
+        kp = pm.keypoints_3d
+        if kp is not None and len(pm.vertices) == len(v_world):
+            kp = np.asarray(kp, dtype=np.float64)
+            ids = [i for i in self._PART_NAMES if i < len(kp)]
+            if ids:
+                d = np.linalg.norm(kp[ids] - np.asarray(pm.vertices[k], np.float64), axis=1)
+                name = self._PART_NAMES[ids[int(np.argmin(d))]]
+
+        faces = np.asarray(pm.faces)
+        for radius in (0.20, 0.30):
+            region = mask & (np.linalg.norm(v_world - lead, axis=1) < radius)
+            fm = region[faces].all(axis=1)
+            if fm.sum() >= 4:
+                break
+        patch = trimesh.Trimesh(vertices=v_world, faces=faces[fm], process=False)
+        normals = np.asarray(patch.vertex_normals)
+        centre = v_world[mask].mean(axis=0)
+        used = np.unique(faces[fm])
+        if len(used) and np.mean(np.sum(normals[used] * (v_world[used] - centre), axis=1)) < 0:
+            normals = -normals  # make sure the lift points out of the body
+        lifted = trimesh.Trimesh(
+            vertices=v_world + normals * 0.012, faces=faces[fm], process=False
+        )
+        material = pyrender.MetallicRoughnessMaterial(
+            baseColorFactor=[1.0, 0.96, 0.72, 1.0],
+            emissiveFactor=[1.0, 0.92, 0.55],
+            doubleSided=True,
+        )
+        meshes = [pyrender.Mesh.from_trimesh(lifted, material=material, smooth=False)]
+        dot = trimesh.creation.icosphere(subdivisions=2, radius=0.06)
+        dot.apply_translation(lead)
+        meshes.append(pyrender.Mesh.from_trimesh(dot, material=material, smooth=True))
+        return {"point": lead, "name": name, "meshes": meshes}
+
+    def _project_point(self, cam_obj, pose: np.ndarray, p: np.ndarray):
+        """Scene point -> output pixel for a pyrender camera at ``pose``."""
+        P = cam_obj.get_projection_matrix(self.video_width, self.video_height)
+        clip = P @ np.linalg.inv(pose) @ np.append(p, 1.0)
+        if clip[3] <= 1e-6:
+            return None
+        ndc = clip[:3] / clip[3]
+        return ((ndc[0] + 1) * 0.5 * self.video_width, (1 - ndc[1]) * 0.5 * self.video_height)
+
+    def _draw_part_callout(
+        self, frame: np.ndarray, anchor, title: str, detail: str, alpha: float
+    ) -> np.ndarray:
+        """Leader line + label box pointing at the line-setting part."""
+        if anchor is None or alpha <= 0:
+            return frame
+        W, H = self.video_width, self.video_height
+        ax, ay = float(anchor[0]), float(anchor[1])
+        t_img = self._render_text_rgba(title, int(H * 0.034), 0.08, ("arialbd.ttf", "DejaVuSans-Bold.ttf"))
+        d_img = self._render_text_rgba(detail, int(H * 0.028), 0.04, ("arialbd.ttf", "DejaVuSans-Bold.ttf"))
+        bw = max(t_img.shape[1], d_img.shape[1]) + 20
+        bh = t_img.shape[0] + d_img.shape[0]
+        right = ax < W * 0.62
+        bx = ax + W * 0.08 if right else ax - W * 0.08 - bw
+        by = max(H * 0.10, ay - H * 0.22)
+        bx = float(np.clip(bx, 10, W - bw - 10))
+        out = frame.astype(np.float32)
+        x0, y0, x1, y1 = int(bx), int(by), int(bx + bw), int(by + bh)
+        out[y0:y1, x0:x1] *= 1.0 - 0.7 * alpha
+        line_end = (x0 if right else x1, int(by + bh * 0.5))
+        lay = out.copy()
+        cv2.line(lay, (int(ax), int(ay)), line_end, (255, 255, 255), 3, cv2.LINE_AA)
+        out = out * (1 - alpha) + lay * alpha
+        self._paste_rgba(out, t_img, x0 + t_img.shape[1] / 2 + 6, y0 + t_img.shape[0] / 2, 1.0, alpha)
+        self._paste_rgba(out, d_img, x0 + d_img.shape[1] / 2 + 6,
+                         y0 + t_img.shape[0] + d_img.shape[0] / 2 - 4, 1.0, alpha)
+        return np.clip(out, 0, 255).astype(np.uint8)
+
     def _render_finale(
         self,
         writer,
@@ -1334,12 +1446,68 @@ class VAR3DRenderer:
             eye_h, cam_y, offside_cx,
             "n/a" if gap_m is None else f"{gap_m:+.2f} m",
         )
+        # --- Line-setting body part on the defender --------------------------
+        part = None
+        if (
+            defender_idx is not None
+            and defender_idx in planted
+            and attacking_side in ("left", "right")
+        ):
+            try:
+                part = self._line_setting_part(
+                    *planted[defender_idx], attacking_side, trimesh, pyrender
+                )
+            except Exception as exc:  # noqa: BLE001 - the flash is optional
+                logger.warning("Line-setting part highlight skipped: %s", exc)
+        part_meshes = part["meshes"] if part else []
+        for pmh in part_meshes:
+            pmh.is_visible = False
+            scene.add(pmh)
+
+        def show_part(on: bool) -> None:
+            for pmh in part_meshes:
+                pmh.is_visible = on
+
         move(last_pose, bird, 1.6)
         hold(bird, 0.7)
         move(bird, side_pose, 2.0)
         hold(side_pose, 0.4)
 
-        # Verdict: freeze on the side-on view; pulse the glow layers.
+        if part is not None:
+            # Slide along the line (still exactly side-on) up to the part,
+            # pulse it slowly with a label, then pull back for the verdict.
+            pt = part["point"]
+            # ~6.5 m back keeps the whole player in frame with the part
+            # clearly visible; aiming at mid-body avoids cutting the head.
+            close = self._look_at_pose(
+                np.array([offside_cx, pt[1] + side * 6.5, 1.1]),
+                np.array([pt[0], pt[1], 0.8]),
+            )
+            move(side_pose, close, 1.0)
+            dark = render_3d_frame(close)
+            show_part(True)
+            glow = render_3d_frame(close)
+            anchor = self._project_point(cam_obj, close, pt)
+            title = "LINE SET HERE"
+            num = f"#{defender_idx}" if defender_idx is not None else ""
+            detail = f"DEFENDER {num}  -  {part['name']}".replace("  ", " ")
+            n = int(2.8 * fps)
+            for i in range(n):
+                t = i / fps
+                # Slow, soft pulse (1 s period): dark -> lit -> dark -> lit ...
+                # reaching full glow at 2.5 s and holding it.
+                level = 1.0 if t >= 2.5 else 0.5 - 0.5 * math.cos(2 * math.pi * t)
+                frame = cv2.addWeighted(dark, 1.0 - level, glow, level, 0)
+                frame = self._draw_part_callout(
+                    frame, anchor, title, detail, float(np.clip(t / 0.5, 0, 1))
+                )
+                writer.write(frame)
+                written += 1
+            move(close, side_pose, 0.8)
+            logger.info("Line-setting part: %s at %s", part["name"], np.round(pt, 2))
+
+        # Verdict: freeze on the side-on view; pulse the glow layers.  The
+        # line-setting part stays steadily lit throughout.
         base = render_3d_frame(side_pose)
         for gm in glow_meshes:
             gm.is_visible = True
