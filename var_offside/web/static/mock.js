@@ -1422,9 +1422,261 @@ function mockAutoFit() {
  * Build a mock API object with the same surface as the real one in app.js.
  * @returns {object} API implementation for mock mode.
  */
+/* ==========================================================================
+   Auto-review: scripted runs, one for each ending
+   ========================================================================== */
+
+const AR_RUN_GAP_MS = 320;
+const AR_TOO_CLOSE = "Too close to call: the margin of +0.12 m is smaller than the ±0.30 m uncertainty.";
+const AR_MISSED_BOX = [1022, 382, 1054, 494];
+const AR_FALSE_BOX = [1206, 262, 1236, 352];
+
+/** The offside line moved so it passes through an image point. */
+function lineThrough(x, y) {
+  const [a, b] = OFFSIDE_LINE;
+  const along = a[0] + ((y - a[1]) / (b[1] - a[1])) * (b[0] - a[0]);
+  return OFFSIDE_LINE.map(([px, py]) => [px + x - along, py]);
+}
+
+const AR_SAFE_LINE = lineThrough(AR_MISSED_BOX[2], AR_MISSED_BOX[3]);
+
+/** Pitch markings as image polylines, for the camera correction. */
+function arPitchLines(dx = 0, dy = 0) {
+  const project = ([x, y]) => {
+    const H = MOCK_AUTO_H;
+    const w = H[2][0] * x + H[2][1] * y + H[2][2];
+    return [
+      (H[0][0] * x + H[0][1] * y + H[0][2]) / w + dx,
+      (H[1][0] * x + H[1][1] * y + H[1][2]) / w + dy,
+    ];
+  };
+  return [
+    [[105, 13.84], [88.5, 13.84], [88.5, 54.16], [105, 54.16]],
+    [[105, 24.84], [99.5, 24.84], [99.5, 43.16], [105, 43.16]],
+    [[52.5, 0], [52.5, 68]],
+  ].map((line) => line.map(project));
+}
+
+/** What the detector returns in these runs: a missed player and three mistakes to correct. */
+function arStartPlayers() {
+  const players = buildPlayers().filter((player) => player.id !== 14);
+  for (const player of players) {
+    if (player.id === 18) player.team = 1;
+    if (player.id === 15) {
+      player.team = 2;
+      player.role = "player";
+    }
+  }
+  players.push({ id: 30, bbox: AR_FALSE_BOX, team: 1, role: "player", confidence: 0.41 });
+  return players;
+}
+
+/** The events for one run. A `{ wait: true }` step holds until the question is answered. */
+function arScript(kind) {
+  const check = (name) => ({ type: "check_started", check: name });
+  const setKeeper = {
+    type: "role_changed",
+    player_id: 1,
+    role: "goalkeeper",
+    from_role: "player",
+    reason: "Marked #1 as keeper: kit differs from both teams",
+    flips_call: false,
+    undo_id: "d-keeper",
+  };
+  const opening = [
+    check("frame"),
+    check("side"),
+    {
+      type: "side_set",
+      side: "right",
+      reason: "Set the attack to the right: goal in view and run to the right",
+      flips_call: false,
+      undo_id: "d-side",
+    },
+    check("team"),
+    {
+      type: "attacking_team_set",
+      team: 2,
+      reason: "Set Team 2 as attacking: has the ball, and Team 1 forms the back line",
+      flips_call: false,
+      undo_id: "d-team",
+    },
+    check("keeper"),
+  ];
+  const camera = [
+    check("camera"),
+    {
+      type: "camera_refined",
+      from_lines: arPitchLines(-20, 9),
+      to_lines: arPitchLines(),
+      reason: "Refined the camera: pitch lines now sit on the paint",
+      flips_call: false,
+      undo_id: "d-camera",
+    },
+    check("call"),
+    { type: "line_moved", from_points: null, to_points: clone(OFFSIDE_LINE), player_id: 7 },
+  ];
+  const firstCall = { type: "call_changed", from: "unknown", to: "offside", margin_m: 1.0 };
+  const corrections = [
+    check("players"),
+    {
+      type: "player_added",
+      player_id: 14,
+      bbox: AR_MISSED_BOX,
+      team: 1,
+      reason: "Added missed defender #14",
+      flips_call: true,
+      undo_id: "d-missed",
+    },
+    { type: "line_moved", from_points: clone(OFFSIDE_LINE), to_points: clone(AR_SAFE_LINE), player_id: 14 },
+    { type: "call_changed", from: "offside", to: "onside", margin_m: 2.0 },
+    {
+      type: "box_removed",
+      player_id: 30,
+      bbox: AR_FALSE_BOX,
+      team: 1,
+      reason: "Removed #30: a ball boy behind the touchline",
+      flips_call: false,
+      undo_id: "d-false",
+    },
+    check("teams"),
+    {
+      type: "team_changed",
+      player_id: 18,
+      from_team: 1,
+      to_team: 2,
+      reason: "Moved #18 to Team 2: the kit matches Team 2",
+      flips_call: false,
+      undo_id: "d-team18",
+    },
+    check("officials"),
+    {
+      type: "role_changed",
+      player_id: 15,
+      role: "referee",
+      from_role: "player",
+      reason: "Marked #15 as referee: black kit, matches neither team",
+      flips_call: false,
+      undo_id: "d-referee",
+    },
+    check("stability"),
+    { type: "run_ended", ending: "cleared", reason: null },
+  ];
+
+  if (kind === "not_usable") {
+    return [check("frame"), { type: "run_ended", ending: "not_usable", reason: "Close-up: 5 people and no pitch lines." }];
+  }
+  if (kind === "too_close") {
+    return [
+      ...opening,
+      setKeeper,
+      ...camera,
+      check("stability"),
+      { type: "run_ended", ending: "too_close", reason: AR_TOO_CLOSE },
+    ];
+  }
+  if (kind === "question") {
+    return [
+      ...opening,
+      {
+        type: "question_asked",
+        question_id: "q-keeper",
+        text: "Is #1 the keeper?",
+        player_ids: [1],
+        choices: ["Yes", "Another player", "Not in frame"],
+      },
+      { wait: true },
+      ...camera,
+      firstCall,
+      ...corrections,
+    ];
+  }
+  return [...opening, setKeeper, ...camera, firstCall, ...corrections];
+}
+
+/** A verdict for the scripted scene. Its numbers come from the script, not from geometry. */
+function arVerdict(run) {
+  const side = run.side;
+  if (!side) return unknownVerdict("right", "Choose the attack direction.");
+  const problem = choiceError(activePlayers, run.team, run.keeper);
+  if (problem) return unknownVerdict(side, problem);
+  if (run.kind === "too_close") {
+    return { ...unknownVerdict(side, AR_TOO_CLOSE), line_image_points: clone(OFFSIDE_LINE) };
+  }
+  const added = activePlayers.some((player) => player.id === 14);
+  const verdict = added ? "onside" : "offside";
+  const margin = added ? -2.0 : 1.0;
+  const defender = added ? 14 : 7;
+  const label = verdict === "onside" ? "Onside" : "Offside";
+  return {
+    verdict,
+    estimate: false,
+    message: null,
+    margin_m: margin,
+    attacking_side: side,
+    last_defender: { id: defender, part: "right foot" },
+    offside_player_ids: added ? [] : [2],
+    line_image_points: clone(added ? AR_SAFE_LINE : OFFSIDE_LINE),
+    line_field_x: added ? 86.2 : 80.1,
+    calibration: { method: "pnl", full_3d: true, edited: false },
+    checks: [
+      { key: "players", label: "Players", status: "ok", detail: String(activePlayers.length) },
+      { key: "teams", label: "Teams", status: "ok", detail: "2" },
+      { key: "side", label: "Attack direction", status: "ok", detail: side === "left" ? "Left" : "Right" },
+      { key: "calibration", label: "Calibration", status: "ok", detail: "PnL · 3D" },
+      { key: "defender", label: "Last defender", status: "ok", detail: `#${defender} · right foot` },
+      { key: "verdict", label: "Verdict", status: "ok", detail: `${label} · ${Math.abs(margin).toFixed(2)} m` },
+    ],
+    stages: ["original", "detection", "teams", "calibration", "offside", "birdseye", "result"],
+    time_ms: 2210,
+    view3d_available: false,
+  };
+}
+
+/** Change the mock's own scene for an event, as the server would. */
+function arApply(run, event) {
+  switch (event.type) {
+    case "player_added":
+      activePlayers.push({ id: event.player_id, bbox: event.bbox, team: event.team, role: "player", confidence: 0.8 });
+      break;
+    case "box_removed":
+      activePlayers = activePlayers.filter((player) => player.id !== event.player_id);
+      break;
+    case "team_changed":
+      activePlayers.find((player) => player.id === event.player_id).team = event.to_team;
+      break;
+    case "role_changed":
+      activePlayers.find((player) => player.id === event.player_id).role = event.role;
+      if (event.role === "goalkeeper") run.keeper = "player";
+      break;
+    case "side_set":
+      run.side = event.side;
+      break;
+    case "attacking_team_set":
+      run.team = event.team;
+      break;
+    default:
+      break;
+  }
+}
+
+function arResult(run, ending, reason) {
+  return {
+    ending,
+    reason: reason || null,
+    players: clone(activePlayers),
+    attacking_side: run.side,
+    attacking_team: run.team,
+    keeper: run.keeper,
+    verdict: ending === "not_usable" ? null : arVerdict(run),
+    stability: ending === "cleared" ? { alternatives_tested: 13, changed_the_call: 0 } : null,
+  };
+}
+
 export function createMockApi() {
   let sessionCount = 0;
   let mockApplied = null;
+  let arRun = null;
 
   return {
     mode: "mock",
@@ -1469,6 +1721,7 @@ export function createMockApi() {
     async detect() {
       await wait(900);
       activePlayers = buildPlayers();
+      arRun = null;
       stageCache.clear();
       return phase1(activePlayers);
     },
@@ -1477,6 +1730,7 @@ export function createMockApi() {
     async putPlayers(_sessionId, players) {
       await wait(260);
       stageCache.clear();
+      if (arRun) arRun.edited = true;
       const next = clone(players).map((player, index) => {
         if (player.id === null || player.id === undefined) {
           return { ...player, id: 20 + index };
@@ -1525,6 +1779,7 @@ export function createMockApi() {
     /** Phase 2: a fixed offside verdict with a 0.84 m margin, once the choices are made. */
     async analyze(_sessionId, attackingSide, attackingTeam, keeper) {
       await wait(1150);
+      if (arRun && !arRun.edited && arRun.ended) return arVerdict(arRun);
       const side = attackingSide || "right";
       const problem = choiceError(activePlayers, attackingTeam, keeper);
       if (problem) return unknownVerdict(side, problem);
@@ -1568,6 +1823,135 @@ export function createMockApi() {
         time_ms: 2210,
         view3d_available: true,
       };
+    },
+
+    /** Start a scripted Auto-review run. The real server will run the checks here. */
+    async startAutoReview(_sessionId, kind = "cleared") {
+      await wait(120);
+      activePlayers = arStartPlayers();
+      stageCache.clear();
+      arRun = {
+        kind,
+        steps: arScript(kind),
+        events: [],
+        side: null,
+        team: null,
+        keeper: null,
+        result: null,
+        ended: false,
+        edited: false,
+        applied: new Map(),
+        waiting: false,
+        nextAt: performance.now() + AR_RUN_GAP_MS,
+      };
+      return { job_id: "mock-auto-review", phase1: phase1(activePlayers) };
+    },
+
+    /** New events since `since`, and the result once the run has ended. */
+    async getAutoReview(_sessionId, since = 0) {
+      const run = arRun;
+      if (!run) throw new Error("No Auto-review run.");
+      while (!run.waiting && !run.ended && performance.now() >= run.nextAt && run.steps.length) {
+        const step = run.steps.shift();
+        if (step.wait) {
+          run.waiting = true;
+          break;
+        }
+        const event = { ...clone(step), seq: run.events.length + 1 };
+        arApply(run, event);
+        if (event.undo_id) run.applied.set(event.undo_id, event);
+        run.events.push(event);
+        run.nextAt = performance.now() + AR_RUN_GAP_MS;
+        if (event.type === "run_ended") {
+          run.ended = true;
+          run.result = arResult(run, event.ending, event.reason);
+        }
+      }
+      const current = [...run.events].reverse().find((event) => event.type === "check_started");
+      return {
+        status: run.ended ? "done" : run.waiting ? "needs_answer" : "running",
+        current_check: current ? current.check : null,
+        events: clone(run.events.slice(since)),
+        result: run.ended ? clone(run.result) : null,
+      };
+    },
+
+    /** Apply the answer to the question the run is waiting on, then carry on. */
+    async answerAutoReview(_sessionId, _questionId, choice) {
+      await wait(120);
+      const run = arRun;
+      if (choice === "Another player") {
+        run.steps = [{ type: "run_ended", ending: "needs_answer", reason: "Mark the keeper in Review." }];
+      } else if (choice === "Yes") {
+        run.steps.unshift({
+          type: "role_changed",
+          player_id: 1,
+          role: "goalkeeper",
+          from_role: "player",
+          reason: "Marked #1 as keeper: you confirmed it",
+          flips_call: false,
+          undo_id: "d-keeper",
+        });
+      } else {
+        run.keeper = "not_in_frame";
+      }
+      run.waiting = false;
+      run.nextAt = performance.now();
+      return { status: "running" };
+    },
+
+    /** Revert one correction and rerun the call. */
+    async undoAutoReview(_sessionId, undoId) {
+      await wait(160);
+      const run = arRun;
+      const event = run.applied.get(undoId);
+      if (!event) throw new Error("That correction can't be undone.");
+      run.applied.delete(undoId);
+      const before = arVerdict(run);
+      switch (event.type) {
+        case "player_added":
+          activePlayers = activePlayers.filter((player) => player.id !== event.player_id);
+          break;
+        case "box_removed":
+          activePlayers.push({ id: event.player_id, bbox: event.bbox, team: event.team, role: "player", confidence: 0.41 });
+          break;
+        case "team_changed":
+          activePlayers.find((player) => player.id === event.player_id).team = event.from_team;
+          break;
+        case "role_changed":
+          activePlayers.find((player) => player.id === event.player_id).role = event.from_role;
+          if (event.role === "goalkeeper") run.keeper = null;
+          break;
+        case "side_set":
+          run.side = null;
+          break;
+        case "attacking_team_set":
+          run.team = null;
+          break;
+        default:
+          break;
+      }
+      const after = arVerdict(run);
+      const events = [];
+      const hasLines = before.line_image_points.length >= 2 && after.line_image_points.length >= 2;
+      if (hasLines && before.line_image_points[0][0] !== after.line_image_points[0][0]) {
+        events.push({
+          type: "line_moved",
+          from_points: before.line_image_points,
+          to_points: after.line_image_points,
+          player_id: after.last_defender.id,
+        });
+      }
+      if (before.verdict !== after.verdict) {
+        events.push({
+          type: "call_changed",
+          from: before.verdict,
+          to: after.verdict,
+          margin_m: after.margin_m,
+        });
+      }
+      run.result = arResult(run, run.result.ending, run.result.reason);
+      return { events, result: clone(run.result) };
     },
 
     /** Data URL for a debug stage. */

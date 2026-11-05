@@ -57,6 +57,7 @@ class FrameCheck(StrictModel):
 # ---------------------------------------------------------------------------
 
 BBox = Tuple[float, float, float, float]
+Point = Tuple[float, float]
 
 
 class EventBase(StrictModel):
@@ -80,12 +81,14 @@ class PlayerAdded(Correction):
     type: Literal["player_added"] = "player_added"
     player_id: int
     bbox: BBox
+    team: Optional[Literal[1, 2]] = None
 
 
 class BoxRemoved(Correction):
     type: Literal["box_removed"] = "box_removed"
     player_id: int
     bbox: BBox
+    team: Optional[Literal[1, 2]] = None
 
 
 class TeamChanged(Correction):
@@ -99,6 +102,7 @@ class RoleChanged(Correction):
     type: Literal["role_changed"] = "role_changed"
     player_id: int
     role: Literal["player", "goalkeeper", "referee"]
+    from_role: Literal["player", "goalkeeper", "referee"] = "player"
 
 
 class SideSet(Correction):
@@ -113,12 +117,14 @@ class AttackingTeamSet(Correction):
 
 class CameraRefined(Correction):
     type: Literal["camera_refined"] = "camera_refined"
+    from_lines: List[List[Point]] = Field(default_factory=list)
+    to_lines: List[List[Point]] = Field(default_factory=list)
 
 
 class LineMoved(EventBase):
     type: Literal["line_moved"] = "line_moved"
-    from_image_x: float
-    to_image_x: float
+    from_points: Optional[List[Point]] = None  # None when the line first appears
+    to_points: List[Point]
     player_id: Optional[int] = None
 
 

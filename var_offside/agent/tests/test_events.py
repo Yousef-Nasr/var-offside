@@ -19,7 +19,7 @@ from var_offside.agent.schemas import (
 def test_events_are_numbered_in_order_and_read_from_a_position():
     log = EventLog()
     log.add(CheckStarted(check="players"))
-    log.add(LineMoved(from_image_x=690, to_image_x=742, player_id=21))
+    log.add(LineMoved(from_points=[(690, 0), (700, 720)], to_points=[(742, 0), (752, 720)], player_id=21))
     log.add(RunEnded(ending="cleared"))
 
     assert [event["seq"] for event in log.since()] == [1, 2, 3]
@@ -36,6 +36,7 @@ def test_player_added_has_what_the_animation_needs():
         "type": "player_added",
         "player_id": 21,
         "bbox": [742.0, 310.0, 781.0, 402.0],
+        "team": None,
         "reason": "Missed player found",
         "flips_call": True,
         "undo_id": "d1",

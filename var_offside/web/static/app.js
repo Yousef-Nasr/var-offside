@@ -9,6 +9,7 @@
 
 import { createCalibrator } from "./calibrate.js";
 import { createMockApi } from "./mock.js";
+import { createAutoReview } from "./auto_review.js";
 import {
   TEAM_COLORS,
   drawHoverBrackets,
@@ -119,7 +120,11 @@ const state = {
   calReturnVerdict: null,
   // Set after an edit, to show before and after on the new verdict.
   beforeEdit: null,
+  autoReviewOn: false,
 };
+
+/** Runs Auto-review and plays its corrections. Created at boot. */
+let autoReview = null;
 
 /* ==========================================================================
    DOM
@@ -134,6 +139,9 @@ const dom = {
   fileRes: byId("fileRes"),
   openBtn: byId("openBtn"),
   primaryBtn: byId("primaryBtn"),
+  arSwitchWrap: byId("arSwitchWrap"),
+  arSwitch: byId("arSwitch"),
+  arScenario: byId("arScenario"),
   primarySpinner: byId("primarySpinner"),
   primaryLabel: byId("primaryLabel"),
   exportBtn: byId("exportBtn"),
@@ -616,7 +624,7 @@ let api = realApi;
 
 /** Copy the current batch of server checks into the six stable rows. */
 function displayChecks() {
-  if (state.phase === "detecting" || state.phase === "analyzing") {
+  if (state.phase === "detecting" || state.phase === "analyzing" || state.phase === "autoreview") {
     return BASE_CHECKS.map((check) => ({
       ...check,
       status: "pending",
@@ -698,8 +706,13 @@ function renderPrimary() {
         disabled = true;
         break;
       case "loaded":
-        label = "Detect";
+        label = autoReviewEnabled() ? "Auto-review" : "Detect";
         disabled = false;
+        break;
+      case "autoreview":
+        label = "Auto-review…";
+        disabled = true;
+        spinner = true;
         break;
       case "detecting":
         label = "Detecting…";
@@ -764,12 +777,21 @@ function renderVerdict() {
   } else if (state.phase === "loaded") {
     tone = "amber";
     main = "NO CALL";
-    sub = "Press Detect to find the players and teams";
+    sub = autoReviewEnabled()
+      ? "Press Auto-review to check and correct the scene"
+      : "Press Detect to find the players and teams";
     meta = [];
   } else if (state.phase === "detecting") {
     tone = "muted";
     main = "DETECTING";
     sub = "Finding players, teams and roles…";
+  } else if (state.phase === "autoreview") {
+    tone = "muted";
+    eyebrow = "Auto-review";
+    main = "CHECKING";
+    sub = "Checking the scene and correcting what it can prove…";
+    if (state.attackingSide) meta.push(["Attack", sideLabel(state.attackingSide)]);
+    if (state.attackingTeam) meta.push(["Attacking team", `Team ${state.attackingTeam}`]);
   } else if (state.phase === "review") {
     tone = "review";
     eyebrow = "Verdict · Review";
@@ -919,8 +941,9 @@ function renderPhaseSteps() {
       calibrate: "calibrate",
       analyzing: "verdict",
       verdict: "verdict",
+      autoreview: "review",
     }[state.phase] || "load";
-  const working = state.phase === "detecting" || state.phase === "analyzing";
+  const working = state.phase === "detecting" || state.phase === "analyzing" || state.phase === "autoreview";
   const index = order.indexOf(current);
   for (const item of dom.phaseSteps.querySelectorAll("[data-step]")) {
     const at = order.indexOf(item.dataset.step);
@@ -1166,6 +1189,7 @@ function renderStates() {
 
 /** Top-bar mock indicator + sample shortcut. */
 function renderMockChip() {
+  renderAutoReviewSwitch();
   dom.mockChip.hidden = !state.mock;
   dom.mockSample.hidden = !state.mock;
 }
@@ -1339,6 +1363,7 @@ function loadSession(session) {
   state.calReturnVerdict = null;
   state.beforeEdit = null;
   calibrator.close();
+  if (autoReview) autoReview.reset();
   resetReviewChoices();
   state.frameIndex = 0;
   state.view = "photo";
@@ -1418,6 +1443,7 @@ function requestFrame(index, immediate = false) {
 function resetDetections() {
   close3D();
   calibrator.close();
+  if (autoReview) autoReview.reset();
   state.calReturnVerdict = null;
   state.beforeEdit = null;
   state.phase1 = null;
@@ -1449,6 +1475,7 @@ async function detect() {
   if (!state.session || state.busy) return;
   state.busy = true;
   closeCtxMenu();
+  if (autoReview) autoReview.reset();
   setPhase("detecting");
   showProgress(true);
   try {
@@ -1471,6 +1498,197 @@ async function detect() {
     showProgress(false);
     renderAll();
   }
+}
+
+/* ==========================================================================
+   Auto-review
+   ========================================================================== */
+
+/** Available only when the data source can run it. */
+function autoReviewAvailable() {
+  return typeof api.startAutoReview === "function";
+}
+
+function autoReviewEnabled() {
+  return state.autoReviewOn && autoReviewAvailable();
+}
+
+/** Detect, then follow the run. `busy` stays set until the run reaches an ending. */
+async function runAutoReview() {
+  if (!state.session || state.busy) return;
+  const sessionId = state.session.id;
+  state.busy = true;
+  closeCtxMenu();
+  autoReview.reset();
+  setPhase("detecting");
+  showProgress(true);
+  try {
+    const payload = await api.detect(sessionId);
+    const started = await api.startAutoReview(sessionId, dom.arScenario.value);
+    if (!state.session || state.session.id !== sessionId) return;
+    applyPhase1(started.phase1 || payload);
+    resetReviewChoices();
+    state.verdict = null;
+    state.calReturnVerdict = null;
+    state.beforeEdit = null;
+    state.has3d = false;
+    state.view = "photo";
+    setPhase("autoreview");
+    autoReview.start(sessionId);
+  } catch (error) {
+    state.busy = false;
+    pushNotice("Auto-review failed", error.message || String(error), true);
+    setPhase("loaded");
+  } finally {
+    showProgress(false);
+    renderAll();
+  }
+}
+
+/** Change the local scene for one event, so the overlay stays in step with the effects. */
+function applyAutoReviewEvent(event) {
+  const findIndex = () => state.players.findIndex((player) => player.id === event.player_id);
+  switch (event.type) {
+    case "player_added":
+      state.players = [
+        ...state.players,
+        { id: event.player_id, bbox: event.bbox, team: event.team, role: "player", confidence: 0.8 },
+      ];
+      break;
+    case "box_removed":
+      state.players = state.players.filter((player) => player.id !== event.player_id);
+      break;
+    case "team_changed": {
+      const index = findIndex();
+      if (index >= 0) state.players[index] = { ...state.players[index], team: event.to_team };
+      break;
+    }
+    case "role_changed": {
+      const index = findIndex();
+      if (index >= 0) state.players[index] = { ...state.players[index], role: event.role };
+      break;
+    }
+    case "side_set":
+      state.attackingSide = event.side;
+      break;
+    case "attacking_team_set":
+      state.attackingTeam = event.team;
+      break;
+    default:
+      return;
+  }
+  renderVerdict();
+  drawPhoto();
+}
+
+/** Copy the saved scene from a finished run, so what shows is what the call used. */
+function applyAutoReviewScene(result) {
+  state.players = result.players;
+  state.attackingSide = result.attacking_side;
+  state.attackingTeam = result.attacking_team;
+  state.keeperNotInFrame = result.keeper === "not_in_frame";
+}
+
+function onAutoReviewResult(result, info) {
+  state.busy = false;
+  state.replaying = false;
+  state.pendingReplay = false;
+  close3D();
+  if (info.ending === "not_usable") {
+    state.players = [];
+    state.verdict = null;
+    state.has3d = false;
+    setPhase("loaded");
+    return;
+  }
+  applyAutoReviewScene(result);
+  state.verdict = result.verdict;
+  state.has3d = Boolean(result.verdict && result.verdict.view3d_available);
+  state.view = "photo";
+  state.stageVersion += 1;
+  if (reviewMissing().length) {
+    state.verdict = null;
+    state.has3d = false;
+    setPhase("review");
+  } else {
+    setPhase("verdict");
+  }
+  renderAll();
+  drawPhoto();
+}
+
+function onAutoReviewByHand(result) {
+  state.busy = false;
+  if (result && result.ending === "not_usable") {
+    detect();
+    return;
+  }
+  if (result) applyAutoReviewScene(result);
+  state.verdict = null;
+  state.has3d = false;
+  setPhase("review");
+  renderAll();
+  drawPhoto();
+}
+
+function onAutoReviewFailed(message) {
+  state.busy = false;
+  pushNotice("Auto-review stopped", `${message} Check this frame by hand.`, true);
+  state.verdict = null;
+  setPhase(state.players.length ? "review" : "loaded");
+  renderAll();
+  drawPhoto();
+}
+
+/** Wire the switch and create the controller. */
+function setupAutoReview() {
+  autoReview = createAutoReview({
+    api: {
+      startAutoReview: (...args) => api.startAutoReview(...args),
+      getAutoReview: (...args) => api.getAutoReview(...args),
+      answerAutoReview: (...args) => api.answerAutoReview(...args),
+      undoAutoReview: (...args) => api.undoAutoReview(...args),
+    },
+    canvas: byId("autoReviewCanvas"),
+    viewport: dom.viewport,
+    getImageRect: imageRect,
+    lineColor: LINE_COLOR,
+    applyEvent: applyAutoReviewEvent,
+    findPlayer: (id) => state.players.find((player) => player.id === id),
+    playersOfTeam: (team) => state.players.filter((player) => player.team === team),
+    teamColor: (team) => state.teamColors[team] || COLORS.accent,
+    onShow: () => setView("photo"),
+    onResult: onAutoReviewResult,
+    onReviewByHand: onAutoReviewByHand,
+    onFailed: onAutoReviewFailed,
+    onUndoFailed: (message) => pushNotice("Undo failed", message, true),
+  });
+  dom.arSwitch.addEventListener("click", () => {
+    state.autoReviewOn = !state.autoReviewOn;
+    try {
+      localStorage.setItem("var.autoReview", state.autoReviewOn ? "1" : "0");
+    } catch {
+      // The switch still works for this page without saved settings.
+    }
+    renderAutoReviewSwitch();
+    renderPrimary();
+    renderVerdict();
+  });
+  try {
+    state.autoReviewOn = localStorage.getItem("var.autoReview") === "1";
+  } catch {
+    state.autoReviewOn = false;
+  }
+}
+
+function renderAutoReviewSwitch() {
+  dom.arSwitchWrap.hidden = !autoReviewAvailable();
+  dom.arScenario.hidden = !state.autoReviewOn || state.phase !== "loaded";
+  dom.arSwitch.setAttribute("aria-checked", state.autoReviewOn ? "true" : "false");
+  dom.arSwitch.classList.toggle("is-on", state.autoReviewOn);
+  const locked = state.busy || state.phase === "autoreview";
+  dom.arSwitch.disabled = locked;
+  dom.arScenario.disabled = locked;
 }
 
 /** Phase 2. The Review choices must all have been made. */
@@ -1534,7 +1752,8 @@ async function analyze() {
 function primaryAction() {
   if (state.uploading || state.busy) return;
   if (state.phase === "loaded") {
-    detect();
+    if (autoReviewEnabled()) runAutoReview();
+    else detect();
     return;
   }
   if (state.phase === "review") {
@@ -1783,7 +2002,7 @@ function drawPhoto(timestamp) {
   const lineColor = drawOffsideLine(ctx, rect);
 
   // Reviewed players: a ring on the ground and a label above the head.
-  if (state.phase === "review" || state.phase === "verdict") {
+  if (state.phase === "review" || state.phase === "verdict" || state.phase === "autoreview") {
     const time = timestamp == null ? performance.now() : timestamp;
     const beat = state.pulse ? (Math.sin(time / 380) + 1) / 2 : 0.5;
     const labels = [];
@@ -1883,6 +2102,7 @@ function drawOffsideLine(ctx, rect) {
   if (
     state.phase !== "verdict" ||
     !verdict ||
+    (autoReview && autoReview.ownsLine()) ||
     !Array.isArray(verdict.line_image_points) ||
     verdict.line_image_points.length < 2
   ) {
@@ -3247,6 +3467,7 @@ async function init() {
   bindEvents();
   setPhase("empty");
   await setupApi();
+  setupAutoReview();
   renderMockChip();
   renderAll();
 }

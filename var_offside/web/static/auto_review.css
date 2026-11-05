@@ -1,0 +1,347 @@
+/* Auto-review: the switch, the effects layer, and what appears over the photo. */
+
+#autoReviewCanvas {
+  position: absolute;
+  inset: 0;
+  z-index: 3;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
+/* --- Switch ------------------------------------------------------------- */
+
+.ar-switch-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ar-switch-wrap[hidden],
+.ar-scenario[hidden],
+.ar-hud[hidden],
+.ar-status[hidden],
+.ar-call[hidden],
+.ar-card[hidden],
+.ar-panel[hidden] {
+  display: none;
+}
+
+.ar-switch {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink-2);
+  font: 500 12.5px var(--font-ui);
+  cursor: pointer;
+}
+
+.ar-switch:hover:not(:disabled) {
+  background: var(--surface-3);
+  color: var(--ink);
+}
+
+.ar-switch:focus-visible,
+.ar-skip:focus-visible,
+.ar-scenario:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.ar-switch:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ar-switch-track {
+  position: relative;
+  width: 28px;
+  height: 16px;
+  border-radius: 999px;
+  background: var(--surface-4);
+  box-shadow: inset 0 0 0 1px var(--rule-strong);
+  transition: background 0.18s;
+}
+
+.ar-switch-thumb {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--ink-2);
+  transition: transform 0.18s, background 0.18s;
+}
+
+.ar-switch.is-on {
+  color: var(--ink);
+}
+
+.ar-switch.is-on .ar-switch-track {
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+
+.ar-switch.is-on .ar-switch-thumb {
+  background: var(--accent);
+  transform: translateX(12px);
+}
+
+.ar-scenario {
+  position: absolute;
+  bottom: 14px;
+  left: 14px;
+  z-index: 31;
+  max-width: 170px;
+  padding: 4px 6px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 5px;
+  background: var(--surface-3);
+  color: var(--ink-2);
+  font: 500 11.5px var(--font-ui);
+}
+
+/* --- Over the photo ----------------------------------------------------- */
+
+.ar-hud {
+  position: absolute;
+  top: 14px;
+  left: 50%;
+  z-index: 31;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 28px);
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+
+.ar-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 6px 7px 6px 12px;
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(12px) saturate(1.3);
+  backdrop-filter: blur(12px) saturate(1.3);
+  color: var(--ink);
+  font: 500 12.5px var(--font-ui);
+  white-space: nowrap;
+  pointer-events: auto;
+}
+
+.ar-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 9px var(--accent);
+  animation: arPulse 1.1s ease-in-out infinite;
+}
+
+.ar-skip {
+  padding: 2px 9px;
+  border: 1px solid var(--rule-strong);
+  border-radius: 999px;
+  background: var(--surface-3);
+  color: var(--ink-2);
+  font: 500 11.5px var(--font-ui);
+  cursor: pointer;
+}
+
+.ar-skip:hover {
+  color: var(--ink);
+}
+
+.ar-call {
+  padding: 3px 16px;
+  border-radius: 6px;
+  background: rgba(5, 8, 7, 0.78);
+  color: var(--amber);
+  font: italic 700 25px/1.2 var(--font-display);
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.ar-call.is-offside {
+  color: var(--red);
+}
+
+.ar-call.is-onside {
+  color: var(--accent);
+}
+
+.ar-call.is-flip {
+  animation: arFlip 0.55s cubic-bezier(0.2, 0.9, 0.3, 1.2);
+}
+
+.ar-card {
+  position: absolute;
+  bottom: 18px;
+  left: 50%;
+  z-index: 31;
+  display: grid;
+  gap: 8px;
+  width: min(430px, calc(100% - 28px));
+  padding: 14px 16px;
+  border: 1px solid var(--glass-border);
+  border-radius: 10px;
+  background: var(--glass);
+  -webkit-backdrop-filter: blur(14px) saturate(1.3);
+  backdrop-filter: blur(14px) saturate(1.3);
+  transform: translateX(-50%);
+  animation: arRise 0.28s ease-out;
+}
+
+.ar-card-label {
+  color: var(--amber);
+  font: 600 11.5px var(--font-display);
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.ar-card-title {
+  color: var(--ink);
+  font: 600 22px/1.2 var(--font-display);
+}
+
+.ar-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ar-hand {
+  margin-left: auto;
+}
+
+/* --- Panel -------------------------------------------------------------- */
+
+.ar-summary {
+  margin: 0 0 8px;
+  color: var(--ink-2);
+  font-size: 12px;
+}
+
+.ar-summary:empty {
+  display: none;
+}
+
+.ar-list {
+  display: grid;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ar-item {
+  display: grid;
+  gap: 5px;
+  padding: 8px 9px;
+  border-left: 2px solid var(--accent);
+  background: var(--surface-2);
+  font-size: 12px;
+  line-height: 1.4;
+  animation: arRise 0.25s ease-out;
+}
+
+.ar-item-text {
+  color: var(--ink);
+}
+
+.ar-chip {
+  justify-self: start;
+  padding: 0 6px;
+  border: 1px solid color-mix(in srgb, var(--amber) 50%, transparent);
+  border-radius: 3px;
+  color: var(--amber);
+  font: 600 10.5px var(--font-mono);
+}
+
+.ar-item-actions {
+  display: flex;
+  gap: 5px;
+}
+
+.ar-list.is-running .ar-undo {
+  display: none;
+}
+
+/* The switch takes space from the steps, so the top bar still fits. */
+.topbar:has(.ar-switch-wrap:not([hidden])) .phase-steps li + li::before {
+  width: 10px;
+  margin: 0 6px;
+}
+
+@media (max-width: 1560px) {
+  .topbar:has(.ar-switch-wrap:not([hidden])) .phase-steps li:not([aria-current]) {
+    font-size: 0;
+    gap: 0;
+  }
+}
+
+@media (max-width: 1240px) {
+  .topbar:has(.ar-switch-wrap:not([hidden])) .phase-steps {
+    display: none;
+  }
+}
+
+@media (max-width: 720px) {
+  .ar-switch {
+    gap: 0;
+    font-size: 0;
+  }
+}
+
+.ar-mini {
+  padding: 2px 8px;
+  font-size: 11.5px;
+}
+
+.ar-item.is-undone {
+  border-left-color: var(--rule-strong);
+  opacity: 0.6;
+}
+
+.ar-item.is-undone .ar-item-text {
+  text-decoration: line-through;
+}
+
+@keyframes arPulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@keyframes arFlip {
+  from {
+    opacity: 0;
+    transform: scale(0.7);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes arRise {
+  from {
+    opacity: 0;
+    translate: 0 6px;
+  }
+  to {
+    opacity: 1;
+    translate: 0 0;
+  }
+}
