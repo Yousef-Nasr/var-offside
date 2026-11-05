@@ -23,6 +23,8 @@ setup(
         "uvicorn>=0.30.0",
         "websockets>=12.0",  # live 3D view in the web app
         "python-multipart>=0.0.9",
+        "requests>=2.31.0",  # Auto-review: OpenRouter calls
+        "python-dotenv>=1.0.0",  # Auto-review: reads var_offside/.env
         # 3D VAR replay rendering
         "trimesh>=4.0.0",
         "pyrender>=0.1.45",
