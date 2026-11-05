@@ -48,7 +48,6 @@ def analyze_image_bytes(
     attacking_side: Optional[str],
     calibration_method: str = "auto",
     device: Optional[str] = None,
-    use_automation: bool = False,
 ) -> dict:
     """Run the offside pipeline on uploaded image bytes and return JSON-safe data."""
     image = decode_image_bytes(image_bytes)
@@ -57,7 +56,6 @@ def analyze_image_bytes(
     result = pipeline.analyze(
         image,
         attacking_side=attacking_side,
-        use_automation=use_automation,
         generate_visualization=False,
         save_result=False,
     )
@@ -149,12 +147,5 @@ def serialize_analysis_result(result) -> dict:
             "players_ahead_of_line": ahead_players,
             "evaluated_players": players,
             "line_player": line_player,
-        },
-        "automation": {
-            "goal_side": result.automation_result.goal_side
-            if result.automation_result is not None
-            else None,
-            "removed_non_player_count": result.removed_non_player_count,
-            "matched_goalkeeper_index": result.automation_goalkeeper_idx,
         },
     }

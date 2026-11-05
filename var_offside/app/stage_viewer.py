@@ -15,7 +15,6 @@ from var_offside.app.offside_viewer import OffsideOverlayViewer
 STAGES = [
     ("original", "Original"),
     ("detection", "Detection"),
-    ("automation", "Automation"),
     ("teams", "Teams"),
     ("calibration", "Calibration"),
     ("offside", "Offside"),

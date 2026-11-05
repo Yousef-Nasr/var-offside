@@ -350,6 +350,310 @@ def _annotate_player_meshes(player_meshes: List[PlayerMesh], result) -> None:
 _ESTIMATOR_CACHE: Dict[Tuple[str, Optional[str], str, str], Any] = {}
 
 
+# ---------------------------------------------------------------------------
+# Reusable calibrated-pitch construction (shared by the cinematic video and
+# the live web view, so both show exactly the same pitch)
+# ---------------------------------------------------------------------------
+
+
+def build_pitch_meshes(
+    trimesh,
+    visible_region: Tuple[float, float, float, float],
+    pitch_length: float = 105.0,
+    pitch_width: float = 68.0,
+) -> List[Any]:
+    """
+    Build the Z-up pitch plane and its white markings as trimesh objects.
+
+    Shared by :func:`add_pitch_surface_and_markings` (video scene, one node
+    per marking) and the live web view (which merges them into one mesh for
+    speed).  World frame: pitch centre at the origin, ``Z`` up, markings at
+    ``z=0.01``.
+
+    Args:
+        trimesh: The imported ``trimesh`` module.
+        visible_region: ``(x_min, x_max, y_min, y_max)`` in absolute field
+            metres (0-105, 0-68); penalty markings outside it are skipped.
+        pitch_length: Pitch length in metres (goal to goal).
+        pitch_width: Pitch width in metres (touchline to touchline).
+
+    Returns:
+        List of ``trimesh.Trimesh`` with face colours set.
+    """
+    meshes: List[Any] = []
+    half_l = pitch_length / 2.0
+    half_w = pitch_width / 2.0
+    vis_x_min, vis_x_max, _, _ = visible_region
+
+    # Pitch surface (full pitch at Z=0)
+    pitch_verts = np.array(
+        [
+            [-half_l, -half_w, 0],
+            [half_l, -half_w, 0],
+            [half_l, half_w, 0],
+            [-half_l, half_w, 0],
+        ],
+        dtype=np.float64,
+    )
+    pitch_faces = np.array([[0, 1, 2], [0, 2, 3]])
+    pitch_color = np.array([38, 96, 44, 255], dtype=np.uint8)  # grass green (RGBA)
+    pm_tri = trimesh.Trimesh(vertices=pitch_verts, faces=pitch_faces, process=False)
+    pm_tri.visual.face_colors = np.tile(pitch_color, (2, 1))
+    meshes.append(pm_tri)
+
+    # Pitch markings (lines at Z=0.01)
+    lw = 0.15
+    white = np.array([220, 220, 240, 255], dtype=np.uint8)
+
+    def quad_line(pts, color=white):
+        v = np.array(pts, dtype=np.float64)
+        f = np.array([[0, 1, 2], [0, 2, 3]])
+        m = trimesh.Trimesh(vertices=v, faces=f, process=False)
+        m.visual.face_colors = np.tile(color, (2, 1))
+        return m
+
+    z_l = 0.01  # line height
+    # Sidelines & goal lines
+    for sign in (-1, 1):
+        y = sign * half_w
+        meshes.append(
+            quad_line(
+                [
+                    [-half_l, y - lw, z_l],
+                    [half_l, y - lw, z_l],
+                    [half_l, y + lw, z_l],
+                    [-half_l, y + lw, z_l],
+                ]
+            )
+        )
+        x = sign * half_l
+        meshes.append(
+            quad_line(
+                [
+                    [x - lw, -half_w, z_l],
+                    [x + lw, -half_w, z_l],
+                    [x + lw, half_w, z_l],
+                    [x - lw, half_w, z_l],
+                ]
+            )
+        )
+
+    # Centre line
+    meshes.append(
+        quad_line(
+            [
+                [-lw, -half_w, z_l],
+                [lw, -half_w, z_l],
+                [lw, half_w, z_l],
+                [-lw, half_w, z_l],
+            ]
+        )
+    )
+
+    # Penalty area lines (in 0-105 coords then centred)
+    penalty_lines = [
+        # Left penalty area
+        [0, 13.84, 16.5, 13.84],
+        [16.5, 13.84, 16.5, 54.16],
+        [0, 54.16, 16.5, 54.16],
+        # Right penalty area
+        [88.5, 13.84, 105, 13.84],
+        [88.5, 13.84, 88.5, 54.16],
+        [88.5, 54.16, 105, 54.16],
+        # Left goal area
+        [0, 24.84, 5.5, 24.84],
+        [5.5, 24.84, 5.5, 43.16],
+        [0, 43.16, 5.5, 43.16],
+        # Right goal area
+        [99.5, 24.84, 105, 24.84],
+        [99.5, 24.84, 99.5, 43.16],
+        [99.5, 43.16, 105, 43.16],
+    ]
+    for lx1, ly1, lx2, ly2 in penalty_lines:
+        # Check if in or near visible region
+        if max(lx1, lx2) < vis_x_min - 10 or min(lx1, lx2) > vis_x_max + 10:
+            continue
+        cx1, cy1 = lx1 - half_l, ly1 - half_w
+        cx2, cy2 = lx2 - half_l, ly2 - half_w
+        # Determine line orientation
+        if abs(cx1 - cx2) < 0.1:  # vertical
+            meshes.append(
+                quad_line(
+                    [
+                        [cx1 - lw, min(cy1, cy2), z_l],
+                        [cx1 + lw, min(cy1, cy2), z_l],
+                        [cx1 + lw, max(cy1, cy2), z_l],
+                        [cx1 - lw, max(cy1, cy2), z_l],
+                    ]
+                )
+            )
+        else:  # horizontal
+            meshes.append(
+                quad_line(
+                    [
+                        [min(cx1, cx2), cy1 - lw, z_l],
+                        [max(cx1, cx2), cy1 - lw, z_l],
+                        [max(cx1, cx2), cy1 + lw, z_l],
+                        [min(cx1, cx2), cy1 + lw, z_l],
+                    ]
+                )
+            )
+    return meshes
+
+
+def build_pitch_stripe_meshes(
+    trimesh,
+    pitch_length: float = 105.0,
+    pitch_width: float = 68.0,
+) -> List[Any]:
+    """
+    Build the alternating grass mow-stripe quads as trimesh objects.
+
+    Args:
+        trimesh: The imported ``trimesh`` module.
+        pitch_length: Pitch length in metres.
+        pitch_width: Pitch width in metres.
+
+    Returns:
+        List of ``trimesh.Trimesh`` with face colours set.
+    """
+    half_l = pitch_length / 2.0
+    half_w = pitch_width / 2.0
+    stripe_count = 10
+    stripe_w = (2 * half_l) / stripe_count
+    dark = np.array([34, 88, 40, 255], dtype=np.uint8)  # darker grass (RGBA)
+    light = np.array([46, 112, 52, 255], dtype=np.uint8)  # lighter grass (RGBA)
+    z_s = 0.005
+    meshes: List[Any] = []
+    for i in range(stripe_count):
+        color = light if i % 2 == 0 else dark
+        x0 = -half_l + i * stripe_w
+        x1 = x0 + stripe_w
+        verts = np.array(
+            [
+                [x0, -half_w, z_s],
+                [x1, -half_w, z_s],
+                [x1, half_w, z_s],
+                [x0, half_w, z_s],
+            ],
+            dtype=np.float64,
+        )
+        faces = np.array([[0, 1, 2], [0, 2, 3]])
+        m = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
+        m.visual.face_colors = np.tile(color, (2, 1))
+        meshes.append(m)
+    return meshes
+
+
+def add_pitch_surface_and_markings(
+    scene,
+    trimesh,
+    pyrender,
+    visible_region: Tuple[float, float, float, float],
+    pitch_length: float = 105.0,
+    pitch_width: float = 68.0,
+    merge: bool = False,
+) -> None:
+    """
+    Add the Z-up pitch plane and its white markings to a pyrender scene.
+
+    This is the reusable form of the pitch construction used by
+    :meth:`VAR3DRenderer._build_scene_calibrated`: the same grass colour,
+    line width, colours and penalty-area geometry, so live views and the
+    cinematic video look identical.
+
+    Args:
+        scene: ``pyrender.Scene`` to add the geometry to.
+        trimesh: The imported ``trimesh`` module.
+        pyrender: The imported ``pyrender`` module.
+        visible_region: ``(x_min, x_max, y_min, y_max)`` in absolute field
+            metres (0-105, 0-68); penalty markings outside it are skipped.
+        pitch_length: Pitch length in metres (goal to goal).
+        pitch_width: Pitch width in metres (touchline to touchline).
+        merge: When ``True`` all markings become one mesh node (faster live
+            rendering); the default keeps one node per marking (video path).
+    """
+    meshes = build_pitch_meshes(
+        trimesh, visible_region, pitch_length, pitch_width
+    )
+    if merge:
+        combined = trimesh.util.concatenate(meshes)
+        scene.add(pyrender.Mesh.from_trimesh(combined, smooth=False))
+        return
+    for m in meshes:
+        scene.add(pyrender.Mesh.from_trimesh(m, smooth=False))
+
+
+def add_pitch_stripes(
+    scene,
+    trimesh,
+    pyrender,
+    pitch_length: float = 105.0,
+    pitch_width: float = 68.0,
+) -> None:
+    """Add alternating grass stripe quads on top of the pitch surface."""
+    for m in build_pitch_stripe_meshes(trimesh, pitch_length, pitch_width):
+        scene.add(pyrender.Mesh.from_trimesh(m, smooth=False))
+
+
+def compute_visible_pitch_region(
+    calibration,
+    image_width: int,
+    image_height: int,
+    pitch_length: float = 105.0,
+    pitch_width: float = 68.0,
+) -> Tuple[float, float, float, float]:
+    """
+    Field rectangle (absolute metres) visible in a broadcast frame.
+
+    Projects the frame's bottom corners and a near-horizon row through the
+    calibration homography and returns the padded, clamped field bounds.
+
+    Args:
+        calibration: ``CalibrationResult`` with ``project_to_field``.
+        image_width: Frame width in pixels.
+        image_height: Frame height in pixels.
+        pitch_length: Pitch length in metres.
+        pitch_width: Pitch width in metres.
+
+    Returns:
+        ``(x_min, x_max, y_min, y_max)`` in absolute field metres.
+    """
+    corners_img = [
+        (0, image_height),  # bottom-left
+        (image_width, image_height),  # bottom-right
+        (0, image_height * 0.3),  # upper-left (~horizon)
+        (image_width, image_height * 0.3),  # upper-right (~horizon)
+    ]
+
+    field_corners = []
+    for cx, cy in corners_img:
+        fp = calibration.project_to_field((cx, cy))
+        if fp is not None:
+            field_corners.append(fp)
+
+    if field_corners:
+        fc = np.array(field_corners)
+        vis_x_min = max(0.0, fc[:, 0].min() - 5)
+        vis_x_max = min(pitch_length, fc[:, 0].max() + 5)
+        vis_y_min = max(0.0, fc[:, 1].min() - 5)
+        vis_y_max = min(pitch_width, fc[:, 1].max() + 5)
+        logger.info(
+            "  Visible pitch region: x=[%.0f, %.0f] y=[%.0f, %.0f]",
+            vis_x_min,
+            vis_x_max,
+            vis_y_min,
+            vis_y_max,
+        )
+    else:
+        # Fallback: show full pitch
+        vis_x_min, vis_x_max = 0, pitch_length
+        vis_y_min, vis_y_max = 0, pitch_width
+        logger.warning("  Could not determine visible region - using full pitch")
+
+    return (float(vis_x_min), float(vis_x_max), float(vis_y_min), float(vis_y_max))
+
+
 class MeshRecovery:
     """
     Run SAM 3D Body (or Fast-SAM-3D-Body) on an image and return

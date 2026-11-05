@@ -232,7 +232,6 @@ class MainWindow(QMainWindow):
         self._worker.setup_phase1(
             image=self._current_image,
             enable_team_classification=self.controls.get_enable_team_classification(),
-            use_automation=self.controls.get_use_automation(),
         )
         self._worker.start()
 
@@ -242,13 +241,6 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No Data", "Run detection first (Phase 1).")
             return
         attacking_side = self.controls.get_attacking_side()
-        if (
-            attacking_side is None
-            and self.controls.get_use_automation()
-            and self._phase1_result.automation_result is not None
-        ):
-            attacking_side = self._phase1_result.automation_result.goal_side
-            self.controls.set_attacking_side(attacking_side)
         if attacking_side is None:
             QMessageBox.information(
                 self,
@@ -381,14 +373,9 @@ class MainWindow(QMainWindow):
                 self._phase1_result.detections = edited
                 # Re-render teams tab with updated detections
                 self._refresh_teams_tab(edited)
-                if self.controls.get_use_automation():
-                    self.statusBar().showMessage(
-                        "Players updated. Automation side is kept; click Continue."
-                    )
-                else:
-                    self.statusBar().showMessage(
-                        "Players updated. Choose attack side and click Continue."
-                    )
+                self.statusBar().showMessage(
+                    "Players updated. Choose attack side and click Continue."
+                )
             else:
                 # Full result exists — rerun from offside stage
                 self._rerun_with_edits(edited)
@@ -414,14 +401,6 @@ class MainWindow(QMainWindow):
         if self._worker.isRunning():
             return
         attacking_side = self.controls.get_attacking_side()
-        if (
-            attacking_side is None
-            and self.controls.get_use_automation()
-            and self._last_result is not None
-            and self._last_result.automation_result is not None
-        ):
-            attacking_side = self._last_result.automation_result.goal_side
-            self.controls.set_attacking_side(attacking_side)
         if attacking_side is None:
             QMessageBox.information(
                 self,
@@ -456,29 +435,19 @@ class MainWindow(QMainWindow):
         self._set_running(False)
 
         self.controls.enter_phase1_review(result)
-        if result.automation_result is not None:
-            self.controls.set_attacking_side(result.automation_result.goal_side)
         self.act_continue.setEnabled(True)
 
-        # Switch to the most relevant review tab
-        if result.automation_result is not None:
-            self.stage_viewer.switch_to_stage("automation")
-        else:
-            self.stage_viewer.switch_to_stage("teams")
+        # Switch to the review tab
+        self.stage_viewer.switch_to_stage("teams")
 
         if result.errors:
             self.statusBar().showMessage(
                 f"Phase 1 done with errors: {'; '.join(result.errors)}"
             )
         else:
-            if result.automation_result is not None:
-                self.statusBar().showMessage(
-                    "Phase 1 complete - review automation results, edit if needed, then Continue"
-                )
-            else:
-                self.statusBar().showMessage(
-                    "Phase 1 complete - review players, edit if needed, set side, then Continue"
-                )
+            self.statusBar().showMessage(
+                "Phase 1 complete - review players, edit if needed, set side, then Continue"
+            )
 
     def _on_complete(self, result: AnalysisResult):
         """Phase 2 / full pipeline complete."""

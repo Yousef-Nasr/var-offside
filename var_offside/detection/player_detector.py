@@ -12,6 +12,11 @@ from ultralytics import YOLO
 
 from var_offside.config import get_settings
 
+# Pose runs on a crop around each box: padding as a share of the box, and input size.
+POSE_CROP_PAD_X = 0.25
+POSE_CROP_PAD_Y = 0.1
+POSE_CROP_SIZE = 256
+
 
 @dataclass
 class PlayerDetection:
@@ -173,8 +178,11 @@ class PlayerDetector:
                     box_conf = box[4] if len(box) > 4 else 1.0
                     cls = 0  # Default to class 0
                 
+                class_name = result.names.get(int(cls), str(int(cls))) if hasattr(result, 'names') else str(int(cls))
+                if str(class_name).strip().lower() == "ball":
+                    continue
+
                 if verbose:
-                    class_name = result.names.get(int(cls), str(int(cls))) if hasattr(result, 'names') else str(int(cls))
                     print(f"[PlayerDetector] Box {i}: class={class_name}({int(cls)}), conf={box_conf:.2f}, bbox=({x1:.0f},{y1:.0f},{x2:.0f},{y2:.0f})")
                 
                 bbox = (float(x1), float(y1), float(x2), float(y2))
@@ -227,56 +235,74 @@ class PlayerDetector:
         verbose: bool = False
     ) -> List[PlayerDetection]:
         """
-        Add pose keypoints to detections by running pose estimation.
-        
+        Add pose keypoints to detections by running pose estimation on each box.
+
+        Broadcast players are too small for the pose model to find on the full
+        image, so it runs on a crop around each box instead.
+
         Args:
             image: Full image
             detections: List of player detections
             verbose: Print debug info
-            
+
         Returns:
             Updated detections with keypoints
         """
         h, w = image.shape[:2]
-        
-        # Run pose model on full image
+
+        crops = []
+        cropped = []
+        for det in detections:
+            x1, y1, x2, y2 = det.bbox
+            pad_x = POSE_CROP_PAD_X * (x2 - x1)
+            pad_y = POSE_CROP_PAD_Y * (y2 - y1)
+            left, top = int(max(0, x1 - pad_x)), int(max(0, y1 - pad_y))
+            right, bottom = int(min(w, x2 + pad_x)), int(min(h, y2 + pad_y))
+            if right <= left or bottom <= top:
+                continue
+            crops.append(image[top:bottom, left:right])
+            cropped.append((det, left, top))
+
+        if not crops:
+            return detections
+
         pose_results = self.pose_model(
-            image,
+            crops,
             conf=0.25,  # Lower threshold for pose
+            imgsz=POSE_CROP_SIZE,
             device=self.device,
             verbose=False
         )
-        
-        for pose_result in pose_results:
-            if pose_result.keypoints is None:
+
+        for pose_result, (det, left, top) in zip(pose_results, cropped):
+            if pose_result.keypoints is None or pose_result.boxes is None:
                 continue
-            
-            pose_boxes = pose_result.boxes.data.cpu().numpy() if pose_result.boxes is not None else []
+
+            pose_boxes = pose_result.boxes.data.cpu().numpy()
             pose_keypoints = pose_result.keypoints.data.cpu().numpy()
-            
-            if verbose:
-                print(f"[PlayerDetector] Pose model found {len(pose_keypoints)} poses")
-            
-            # Match pose detections to our player detections
-            for det in detections:
-                best_match_idx = None
-                best_iou = 0.3  # Minimum IOU threshold for matching
-                
-                for j, pose_box in enumerate(pose_boxes):
-                    pose_bbox = pose_box[:4]
-                    iou = self._calculate_iou(det.bbox, pose_bbox)
-                    
-                    if iou > best_iou:
-                        best_iou = iou
-                        best_match_idx = j
-                
-                if best_match_idx is not None and best_match_idx < len(pose_keypoints):
-                    det.keypoints = pose_keypoints[best_match_idx]
-                    if verbose:
-                        print(f"[PlayerDetector] Matched pose to player {det.player_id} (IOU={best_iou:.2f})")
-        
+
+            # A crop can hold neighbours too: keep the pose matching this box.
+            best_match_idx = None
+            best_iou = 0.3  # Minimum IOU threshold for matching
+            for j, pose_box in enumerate(pose_boxes):
+                iou = self._calculate_iou(
+                    det.bbox,
+                    (pose_box[0] + left, pose_box[1] + top, pose_box[2] + left, pose_box[3] + top),
+                )
+                if iou > best_iou:
+                    best_iou = iou
+                    best_match_idx = j
+
+            if best_match_idx is not None and best_match_idx < len(pose_keypoints):
+                keypoints = pose_keypoints[best_match_idx].copy()
+                keypoints[:, 0] += left
+                keypoints[:, 1] += top
+                det.keypoints = keypoints
+                if verbose:
+                    print(f"[PlayerDetector] Matched pose to player {det.player_id} (IOU={best_iou:.2f})")
+
         return detections
-    
+
     def _calculate_iou(
         self,
         box1: Tuple[float, float, float, float],

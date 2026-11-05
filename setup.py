@@ -8,7 +8,6 @@ setup(
     description="VAR Offside Detection System for Football",
     author="VAR Offside Team",
     packages=find_packages(),
-    # 3.10+ required: the automation module uses PEP 604 (X | None) unions.
     python_requires=">=3.10",
     install_requires=[
         "torch>=2.0.0",
@@ -22,13 +21,13 @@ setup(
         "PyQt5>=5.15.0",
         "fastapi>=0.115.0",
         "uvicorn>=0.30.0",
+        "websockets>=12.0",  # live 3D view in the web app
         "python-multipart>=0.0.9",
         # 3D VAR replay rendering
         "trimesh>=4.0.0",
         "pyrender>=0.1.45",
         "pyglet<2.0",  # pyrender needs the 1.x OpenGL API
         "scipy>=1.10.0",
-        "python-dotenv>=1.0.0",
     ],
     extras_require={
         "dev": [

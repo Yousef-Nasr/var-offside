@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from typing import Optional, List, Tuple, Union
 
 from var_offside.config import get_settings
-from var_offside.automation import FootballImageAnalysis, analyze_football_frame
 from var_offside.detection import PlayerDetector, PlayerDetection, GoalkeeperFilter
 from var_offside.teams import TeamAssigner, TeamAssignmentResult
 from var_offside.calibration import get_calibrator, CalibrationResult
@@ -41,11 +40,6 @@ class AnalysisResult:
     # Team assignment
     team_result: Optional[TeamAssignmentResult] = None
 
-    # Automation / VLM hints
-    automation_result: Optional[FootballImageAnalysis] = None
-    automation_goalkeeper_idx: Optional[int] = None
-    removed_non_player_count: int = 0
-
     # Calibration
     calibration: Optional[CalibrationResult] = None
 
@@ -57,6 +51,8 @@ class AnalysisResult:
     offside_result: Optional[OffsideResult] = None
     attacking_team: Optional[int] = None
     defending_team: Optional[int] = None
+    keeper_choice: Optional[str] = None
+    verdict_message: Optional[str] = None
 
     # Visualization
     visualization: Optional[np.ndarray] = None
@@ -136,229 +132,12 @@ class OffsidePipeline:
         self.player_viz = PlayerVisualizer()
         self.field_overlay = FieldOverlay()
 
-    def run_automation_analysis(
-        self, image: np.ndarray, verbose: bool = False
-    ) -> FootballImageAnalysis:
-        """Run the VLM automation step for one image."""
-        if verbose:
-            print("[Pipeline] Running automation analysis...")
-        return analyze_football_frame(image)
-
-    @staticmethod
-    def _normalized_bbox_to_pixels(
-        bbox: List[float], image_shape: Tuple[int, int, int]
-    ) -> Tuple[float, float, float, float]:
-        """Convert a normalized bbox into pixel coordinates."""
-        height, width = image_shape[:2]
-        x1, y1, x2, y2 = bbox
-        return (x1 * width, y1 * height, x2 * width, y2 * height)
-
-    @staticmethod
-    def _bbox_iou(
-        bbox_a: Tuple[float, float, float, float],
-        bbox_b: Tuple[float, float, float, float],
-    ) -> float:
-        """Compute IoU between two pixel-space boxes."""
-        ax1, ay1, ax2, ay2 = bbox_a
-        bx1, by1, bx2, by2 = bbox_b
-        inter_x1 = max(ax1, bx1)
-        inter_y1 = max(ay1, by1)
-        inter_x2 = min(ax2, bx2)
-        inter_y2 = min(ay2, by2)
-        if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
-            return 0.0
-        inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
-        area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
-        area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
-        denom = area_a + area_b - inter_area
-        if denom <= 0.0:
-            return 0.0
-        return inter_area / denom
-
-    @staticmethod
-    def _bbox_overlap_ratio(
-        bbox_a: Tuple[float, float, float, float],
-        bbox_b: Tuple[float, float, float, float],
-    ) -> float:
-        """Compute overlap normalized by the smaller box area."""
-        ax1, ay1, ax2, ay2 = bbox_a
-        bx1, by1, bx2, by2 = bbox_b
-        inter_x1 = max(ax1, bx1)
-        inter_y1 = max(ay1, by1)
-        inter_x2 = min(ax2, bx2)
-        inter_y2 = min(ay2, by2)
-        if inter_x2 <= inter_x1 or inter_y2 <= inter_y1:
-            return 0.0
-        inter_area = (inter_x2 - inter_x1) * (inter_y2 - inter_y1)
-        area_a = max(0.0, ax2 - ax1) * max(0.0, ay2 - ay1)
-        area_b = max(0.0, bx2 - bx1) * max(0.0, by2 - by1)
-        denom = min(area_a, area_b)
-        if denom <= 0.0:
-            return 0.0
-        return inter_area / denom
-
-    def _match_bbox_to_detection_index(
-        self,
-        image_shape: Tuple[int, int, int],
-        detections: List[PlayerDetection],
-        normalized_bbox: List[float],
-        excluded_indices: Optional[set[int]] = None,
-    ) -> Optional[int]:
-        """Match one automation bbox to the best detection index."""
-        target_bbox = self._normalized_bbox_to_pixels(normalized_bbox, image_shape)
-        best_idx = None
-        best_score = 0.0
-        excluded_indices = excluded_indices or set()
-
-        for idx, detection in enumerate(detections):
-            if idx in excluded_indices:
-                continue
-            det_bbox = tuple(float(v) for v in detection.bbox)
-            iou = self._bbox_iou(target_bbox, det_bbox)
-            overlap = self._bbox_overlap_ratio(target_bbox, det_bbox)
-            score = max(iou, overlap)
-            if score > best_score:
-                best_score = score
-                best_idx = idx
-
-        if best_score < 0.3:
-            return None
-        return best_idx
-
-    def apply_automation_hints(
-        self,
-        image: np.ndarray,
-        detections: List[PlayerDetection],
-        automation_result: FootballImageAnalysis,
-        verbose: bool = False,
-    ) -> Tuple[List[PlayerDetection], Optional[int], List[int], Optional[int]]:
-        """Use VLM output to remove non-players and pre-mark the goalkeeper."""
-        non_player_indices: set[int] = set()
-        for item in automation_result.non_players:
-            matched_idx = self._match_bbox_to_detection_index(
-                image.shape,
-                detections,
-                item.bbox,
-                excluded_indices=non_player_indices,
-            )
-            if matched_idx is not None:
-                non_player_indices.add(matched_idx)
-
-        filtered_detections = [
-            detection
-            for idx, detection in enumerate(detections)
-            if idx not in non_player_indices
-        ]
-
-        original_goalkeeper_idx = None
-        if automation_result.goalkeeper is not None and detections:
-            original_goalkeeper_idx = self._match_bbox_to_detection_index(
-                image.shape,
-                detections,
-                automation_result.goalkeeper.bbox,
-                excluded_indices=non_player_indices,
-            )
-
-        goalkeeper_idx = None
-        if original_goalkeeper_idx is not None:
-            kept_indices = [
-                idx for idx in range(len(detections)) if idx not in non_player_indices
-            ]
-            if original_goalkeeper_idx in kept_indices:
-                goalkeeper_idx = kept_indices.index(original_goalkeeper_idx)
-
-        if (
-            verbose
-            and automation_result.goalkeeper is not None
-            and goalkeeper_idx is None
-        ):
-            print(
-                "[Pipeline] Automation goalkeeper could not be matched to a kept detection"
-            )
-
-        if verbose:
-            print(
-                "[Pipeline] Automation matched "
-                f"{len(non_player_indices)} non-player(s) and goalkeeper="
-                f"{goalkeeper_idx if goalkeeper_idx is not None else 'none'}"
-            )
-
-        return (
-            filtered_detections,
-            goalkeeper_idx,
-            sorted(non_player_indices),
-            original_goalkeeper_idx,
-        )
-
-    def draw_automation_debug(
-        self,
-        image: np.ndarray,
-        detections: List[PlayerDetection],
-        excluded_indices: List[int],
-        goalkeeper_idx: Optional[int],
-    ) -> np.ndarray:
-        """Draw automation-kept players, excluded detections, and the goalkeeper."""
-        output = image.copy()
-        excluded_set = set(excluded_indices)
-
-        for idx, det in enumerate(detections):
-            x1, y1, x2, y2 = [int(c) for c in det.bbox]
-            if idx == goalkeeper_idx:
-                color = (0, 255, 255)
-                label = f"#{idx} GK"
-                thickness = 3
-            elif idx in excluded_set:
-                color = (0, 0, 255)
-                label = f"#{idx} EXCLUDED"
-                thickness = 2
-            else:
-                color = (0, 200, 0)
-                label = f"#{idx} PLAYER"
-                thickness = 2
-
-            cv2.rectangle(output, (x1, y1), (x2, y2), color, thickness)
-            cv2.putText(
-                output,
-                label,
-                (x1, max(20, y1 - 8)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
-                color,
-                2,
-            )
-
-        cv2.putText(
-            output,
-            "Automation Review: green=kept, red=excluded, yellow=goalkeeper",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.8,
-            (255, 255, 255),
-            2,
-        )
-
-        return output
-
-    @staticmethod
-    def infer_team_context_from_goalkeeper(
-        detections: List[PlayerDetection], goalkeeper_idx: Optional[int]
-    ) -> Tuple[Optional[int], Optional[int]]:
-        """Infer attacking and defending teams from the matched goalkeeper."""
-        if goalkeeper_idx is None or goalkeeper_idx >= len(detections):
-            return (None, None)
-        defending_team = detections[goalkeeper_idx].team_id
-        if defending_team not in (1, 2):
-            return (None, None)
-        attacking_team = 1 if defending_team == 2 else 2
-        return attacking_team, defending_team
-
     def analyze(
         self,
         image: Union[str, Path, np.ndarray],
         attacking_team: Optional[int] = None,
         attacking_side: Optional[str] = None,
         enable_team_classification: bool = False,
-        use_automation: bool = False,
         exclude_goalkeeper: bool = True,
         offside_method: str = "geometry",
         generate_visualization: bool = True,
@@ -378,7 +157,6 @@ class OffsidePipeline:
             attacking_team: Team id for the attackers when known (1 or 2)
             attacking_side: Manual attacking direction ('left' or 'right')
             enable_team_classification: Whether to run team clustering
-            use_automation: Whether to use VLM hints for side/GK/non-player filtering
             exclude_goalkeeper: Whether to exclude detected goalkeepers
             offside_method: Offside computation method:
                 'geometry' (default) uses the bbox-corner + homography line;
@@ -424,7 +202,7 @@ class OffsidePipeline:
         image_np = result.image
         h, w = image_np.shape[:2]
         effective_team_classification = (
-            enable_team_classification or use_automation or attacking_team in (1, 2)
+            enable_team_classification or attacking_team in (1, 2)
         )
 
         # Save original image for debug
@@ -469,38 +247,6 @@ class OffsidePipeline:
                 result.processing_time_ms = (time.time() - start_time) * 1000
                 return result
 
-            raw_detections = list(result.detections)
-            automation_goalkeeper_idx = None
-            automation_excluded_indices: List[int] = []
-            automation_original_goalkeeper_idx = None
-            if use_automation:
-                try:
-                    result.automation_result = self.run_automation_analysis(
-                        image_np, verbose=verbose
-                    )
-                    (
-                        result.detections,
-                        automation_goalkeeper_idx,
-                        automation_excluded_indices,
-                        automation_original_goalkeeper_idx,
-                    ) = self.apply_automation_hints(
-                        image_np,
-                        result.detections,
-                        result.automation_result,
-                        verbose=verbose,
-                    )
-                    result.automation_goalkeeper_idx = automation_goalkeeper_idx
-                    result.removed_non_player_count = len(automation_excluded_indices)
-                    if attacking_side not in ("left", "right"):
-                        attacking_side = result.automation_result.goal_side
-                except Exception as exc:
-                    result.errors.append(f"Automation skipped: {exc}")
-
-            if not result.detections:
-                result.errors.append("No players detected after automation filtering")
-                result.processing_time_ms = (time.time() - start_time) * 1000
-                return result
-
             # 4. Assign teams (optional; geometry mode does not depend on it)
             if effective_team_classification:
                 try:
@@ -520,59 +266,28 @@ class OffsidePipeline:
                 cv2.imwrite(str(debug_dir / "4_teams.jpg"), team_img)
                 print(f"[Debug] Saved: 4_teams.jpg")
 
-            if debug and result.automation_result is not None:
-                automation_img = self.draw_automation_debug(
-                    image_np,
-                    raw_detections,
-                    automation_excluded_indices,
-                    automation_original_goalkeeper_idx,
-                )
-                cv2.imwrite(str(debug_dir / "4_automation.jpg"), automation_img)
-                print(f"[Debug] Saved: 4_automation.jpg")
-
             # 5. Identify goalkeepers
             gk_indices = (None, None)
             if exclude_goalkeeper:
-                if automation_goalkeeper_idx is not None:
-                    result.detections[automation_goalkeeper_idx].is_goalkeeper = True
-                    team_id = result.detections[automation_goalkeeper_idx].team_id
-                    if team_id == 1:
-                        gk_indices = (automation_goalkeeper_idx, None)
-                    elif team_id == 2:
-                        gk_indices = (None, automation_goalkeeper_idx)
-                else:
-                    team_ids = None
-                    if result.team_result is not None:
-                        team_ids = [d.team_id for d in result.detections]
-                    gk_indices = self.goalkeeper_filter.identify_goalkeepers(
-                        image_np,
-                        result.detections,
-                        team_ids,
-                        w,
-                        result.team_result.embeddings if result.team_result else None,
-                    )
+                team_ids = None
+                if result.team_result is not None:
+                    team_ids = [d.team_id for d in result.detections]
+                gk_indices = self.goalkeeper_filter.identify_goalkeepers(
+                    image_np,
+                    result.detections,
+                    team_ids,
+                    w,
+                    result.team_result.embeddings if result.team_result else None,
+                )
 
-                    if gk_indices[0] is not None:
-                        result.detections[gk_indices[0]].is_goalkeeper = True
-                    if gk_indices[1] is not None:
-                        result.detections[gk_indices[1]].is_goalkeeper = True
+                if gk_indices[0] is not None:
+                    result.detections[gk_indices[0]].is_goalkeeper = True
+                if gk_indices[1] is not None:
+                    result.detections[gk_indices[1]].is_goalkeeper = True
 
             if attacking_team in (1, 2):
                 result.attacking_team = attacking_team
                 result.defending_team = 1 if attacking_team == 2 else 2
-            else:
-                (
-                    result.attacking_team,
-                    result.defending_team,
-                ) = self.infer_team_context_from_goalkeeper(
-                    result.detections,
-                    automation_goalkeeper_idx,
-                )
-
-            if use_automation and result.attacking_team is None:
-                result.errors.append(
-                    "Automation could not infer the attacking team; falling back to geometry-only evaluation"
-                )
 
             if debug:
                 gk_img = self._draw_goalkeepers_debug(
@@ -583,7 +298,7 @@ class OffsidePipeline:
 
             if attacking_side not in ("left", "right"):
                 result.errors.append(
-                    "attacking_side must be provided manually or via automation"
+                    "attacking_side must be 'left' or 'right'"
                 )
                 result.processing_time_ms = (time.time() - start_time) * 1000
                 return result
@@ -1080,13 +795,6 @@ class OffsidePipeline:
         if result.attacking_team in (1, 2):
             lines.append(
                 f"Attacking team: {result.attacking_team} | Defending team: {result.defending_team}"
-            )
-
-        if result.automation_result is not None:
-            lines.append(
-                "Automation: "
-                f"goal side {result.automation_result.goal_side} | "
-                f"removed non-players {result.removed_non_player_count}"
             )
 
         if result.offside_result:

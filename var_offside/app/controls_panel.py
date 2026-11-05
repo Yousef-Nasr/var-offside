@@ -49,8 +49,6 @@ class ControlsPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedWidth(260)
-        self._manual_team_classification = False
-        self._manual_exclude_goalkeeper = True
         self._build_ui()
 
     # ------------------------------------------------------------------
@@ -169,11 +167,6 @@ class ControlsPanel(QWidget):
         )
         opt_lay.addWidget(self.chk_team_classification)
 
-        self.chk_use_automation = QCheckBox("Use Automation")
-        self.chk_use_automation.setChecked(False)
-        self.chk_use_automation.toggled.connect(self._on_use_automation_toggled)
-        opt_lay.addWidget(self.chk_use_automation)
-
         root.addWidget(self.opt_group)
 
         # ============================================================
@@ -242,7 +235,7 @@ class ControlsPanel(QWidget):
         self.threed_group.setVisible(False)
         root.addWidget(self.threed_group)
 
-        self._on_use_automation_toggled(self.chk_use_automation.isChecked())
+        self._on_team_classification_toggled(self.chk_team_classification.isChecked())
 
         # -- Save --
         save_row = QHBoxLayout()
@@ -275,9 +268,6 @@ class ControlsPanel(QWidget):
 
     def get_enable_team_classification(self) -> bool:
         return self.chk_team_classification.isChecked()
-
-    def get_use_automation(self) -> bool:
-        return self.chk_use_automation.isChecked()
 
     def set_attacking_side(self, side: str):
         """Select the attacking-side radio button programmatically."""
@@ -329,23 +319,12 @@ class ControlsPanel(QWidget):
         self.results_group.setVisible(True)
         self.lbl_players.setText(f"Players: {result.num_players_detected}")
         classification = "on" if result.team_result is not None else "off"
-        automation = "on" if result.automation_result is not None else "off"
         self.lbl_teams.setText(
-            "Geometry mode: bbox bottom line | "
-            f"team classification {classification} | automation {automation}"
+            f"Geometry mode: bbox bottom line | team classification {classification}"
         )
-        if result.automation_result is not None:
-            self.set_attacking_side_enabled(False)
-            self.lbl_side.setText(
-                f"Side: suggested {result.automation_result.goal_side} from automation"
-            )
-            self.lbl_verdict.setText(
-                "Automation filled the side and goalkeeper filtering"
-            )
-        else:
-            self.set_attacking_side_enabled(True)
-            self.lbl_side.setText("Side: choose left or right below")
-            self.lbl_verdict.setText("Choose attacking side to continue")
+        self.set_attacking_side_enabled(True)
+        self.lbl_side.setText("Side: choose left or right below")
+        self.lbl_verdict.setText("Choose attacking side to continue")
         self.lbl_verdict.setStyleSheet(
             "font-size: 14px; font-weight: bold; padding: 8px;"
             "background-color: #333; color: #ffcc00;"
@@ -359,10 +338,8 @@ class ControlsPanel(QWidget):
         self.lbl_players.setText(f"Players: {result.num_players_detected}")
 
         classification = "on" if result.team_result is not None else "off"
-        automation = "on" if result.automation_result is not None else "off"
         self.lbl_teams.setText(
-            "Geometry mode: bbox bottom line | "
-            f"team classification {classification} | automation {automation}"
+            f"Geometry mode: bbox bottom line | team classification {classification}"
         )
 
         if result.offside_result is not None:
@@ -408,7 +385,6 @@ class ControlsPanel(QWidget):
         self.btn_continue.setEnabled(not running and self.btn_continue.isEnabled())
         self.btn_browse_image.setEnabled(not running)
         self.btn_browse_video.setEnabled(not running)
-        self.chk_use_automation.setEnabled(not running)
         self.chk_team_classification.setEnabled(not running)
         self.btn_edit_players.setEnabled(
             not running and self.btn_edit_players.isEnabled()
@@ -431,36 +407,13 @@ class ControlsPanel(QWidget):
         self.btn_generate_3d.setEnabled(False)
         self.lbl_verdict.setText("")
         self.clear_attacking_side()
-        self.set_attacking_side_enabled(not self.chk_use_automation.isChecked())
+        self.set_attacking_side_enabled(True)
 
     def _on_team_classification_toggled(self, enabled: bool):
-        if self.chk_use_automation.isChecked():
-            self.lbl_teams.setText("Mode: automation + required team classification")
-            return
         if enabled:
             self.lbl_teams.setText("Mode: geometry + team classification")
         else:
             self.lbl_teams.setText("Mode: geometry only")
-
-    def _on_use_automation_toggled(self, enabled: bool):
-        if enabled:
-            self._manual_team_classification = self.chk_team_classification.isChecked()
-            self._manual_exclude_goalkeeper = self.chk_exclude_gk.isChecked()
-            self.chk_team_classification.setChecked(True)
-            self.chk_exclude_gk.setChecked(True)
-            self.chk_team_classification.setEnabled(False)
-            self.chk_exclude_gk.setEnabled(False)
-            self.clear_attacking_side()
-            self.set_attacking_side_enabled(False)
-            self.lbl_attacking_side.setText("Attacking Side (automatic):")
-        else:
-            self.chk_team_classification.setEnabled(True)
-            self.chk_exclude_gk.setEnabled(True)
-            self.chk_team_classification.setChecked(self._manual_team_classification)
-            self.chk_exclude_gk.setChecked(self._manual_exclude_goalkeeper)
-            self.set_attacking_side_enabled(True)
-            self.lbl_attacking_side.setText("Attacking Side:")
-        self._on_team_classification_toggled(self.chk_team_classification.isChecked())
 
     # ------------------------------------------------------------------
     # Private slots

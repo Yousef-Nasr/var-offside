@@ -26,10 +26,10 @@ pyrender>=0.1.45
 Pillow>=9.0.0
 fastapi>=0.115.0
 uvicorn>=0.30.0
+websockets>=12.0  # live 3D view
+scipy>=1.10.0  # calibration solver
 python-multipart>=0.0.9
 pydantic>=2.7.0
-python-dotenv>=1.0.1
-requests>=2.31.0
 
 # Testing
 pytest>=7.0.0

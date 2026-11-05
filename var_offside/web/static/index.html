@@ -1,0 +1,358 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VAR Offside</title>
+  <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#070b09">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230c1310'/%3E%3Cpath d='M9 7h7l-5 18H4z' fill='%233ddc84'/%3E%3Cpath d='M21 5v22' stroke='%23ff4a3d' stroke-width='2.4' stroke-linecap='round'/%3E%3Ccircle cx='25.5' cy='16' r='2.6' fill='%23eaf2ec'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:ital,wght@0,500;0,600;0,700;1,700;1,800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="app" id="app" data-phase="empty">
+    <!-- ============================ Top bar ============================ -->
+    <header class="topbar">
+      <div class="topbar-left">
+        <div class="brand">
+          <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
+            <path d="M9 7h7l-5 18H4z" fill="currentColor"></path>
+            <path d="M21 5v22" stroke="var(--red)" stroke-width="2.4" stroke-linecap="round"></path>
+            <circle cx="25.5" cy="16" r="2.6" fill="var(--ink)"></circle>
+          </svg>
+          <span class="wordmark">VAR <b>Offside</b></span>
+          <span class="mock-chip" id="mockChip" hidden>Mock data</span>
+        </div>
+
+        <div class="filemeta" id="fileMeta">
+          <span class="file-name" id="fileName">No frame</span>
+          <span class="file-res" id="fileRes">—</span>
+        </div>
+      </div>
+
+      <ol class="phase-steps" id="phaseSteps" aria-label="Progress">
+        <li data-step="load"><span class="ps-dot" aria-hidden="true"></span>Load</li>
+        <li data-step="detect"><span class="ps-dot" aria-hidden="true"></span>Detect</li>
+        <li data-step="review"><span class="ps-dot" aria-hidden="true"></span>Review</li>
+        <li data-step="calibrate"><span class="ps-dot" aria-hidden="true"></span>Calibrate</li>
+        <li data-step="verdict"><span class="ps-dot" aria-hidden="true"></span>Verdict</li>
+      </ol>
+
+      <div class="top-actions">
+        <button class="btn ghost" id="openBtn" type="button" title="Open a photo or clip (Ctrl+O)">
+          <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M2 4.5h4l1.4 1.5H14v6.5H2z"></path></svg>
+          Open
+        </button>
+
+        <button class="btn primary" id="primaryBtn" type="button" disabled>
+          <span class="spinner" id="primarySpinner" aria-hidden="true" hidden></span>
+          <span id="primaryLabel">Detect</span>
+          <kbd class="btn-key" aria-hidden="true">F5</kbd>
+        </button>
+
+        <div class="menu-wrap">
+          <button class="btn ghost" id="exportBtn" type="button" aria-haspopup="true" aria-expanded="false" disabled>
+            Export <svg class="caret" viewBox="0 0 10 10" width="9" height="9" aria-hidden="true"><path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+          </button>
+          <div class="popover menu" id="exportMenu" role="menu" aria-label="Export" hidden>
+            <div class="popover-title">Export</div>
+            <button class="menu-item" type="button" role="menuitem" data-kind="image"><span class="mi-icon" aria-hidden="true">▣</span>Image with overlay<span class="mi-ext">PNG</span></button>
+            <button class="menu-item" type="button" role="menuitem" data-kind="replay"><span class="mi-icon" aria-hidden="true">▶</span>Replay video<span class="mi-ext">MP4</span></button>
+            <button class="menu-item" type="button" role="menuitem" data-kind="birdseye"><span class="mi-icon" aria-hidden="true">◎</span>Bird's-eye video<span class="mi-ext">MP4</span></button>
+            <button class="menu-item" type="button" role="menuitem" data-kind="debug"><span class="mi-icon" aria-hidden="true">≡</span>Debug video<span class="mi-ext">MP4</span></button>
+            <button class="menu-item" type="button" role="menuitem" data-kind="report"><span class="mi-icon" aria-hidden="true">⧉</span>Report<span class="mi-ext">ZIP</span></button>
+          </div>
+        </div>
+
+        <span class="top-divider" aria-hidden="true"></span>
+
+        <div class="menu-wrap">
+          <button class="icon-btn" id="settingsBtn" type="button" aria-label="Settings" aria-haspopup="true" aria-expanded="false" title="Settings">
+            <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round">
+              <path d="M3 6h8M15 6h2M3 14h2M9 14h8"></path>
+              <circle cx="13" cy="6" r="2"></circle>
+              <circle cx="7" cy="14" r="2"></circle>
+            </svg>
+          </button>
+          <div class="popover settings" id="settingsPopover" aria-label="Settings" hidden>
+            <div class="popover-title">Settings</div>
+            <div class="setting-row">
+              <span>Show steps</span>
+              <button class="switch" id="stepsSwitch" type="button" role="switch" aria-checked="true" aria-label="Show steps">
+                <span class="switch-knob"></span>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div class="menu-wrap">
+          <button class="icon-btn help-btn" id="helpBtn" type="button" aria-label="Keyboard shortcuts" aria-haspopup="true" aria-expanded="false" title="Keyboard shortcuts">?</button>
+          <div class="popover help" id="helpPopover" aria-label="Keyboard shortcuts" hidden>
+            <div class="popover-title">Shortcuts</div>
+            <div class="shortcut-row"><span>Primary action</span><kbd>F5</kbd></div>
+            <div class="shortcut-row"><span>Open photo or clip</span><kbd>Ctrl</kbd><kbd>O</kbd></div>
+            <div class="shortcut-row"><span>Camera presets</span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd></div>
+            <div class="shortcut-row"><span>Broadcast camera</span><kbd>R</kbd></div>
+            <div class="shortcut-row"><span>Play / stop replay</span><kbd>Space</kbd></div>
+            <div class="shortcut-row"><span>Photo / 3D view</span><kbd>Tab</kbd></div>
+            <div class="shortcut-row"><span>Attack direction</span><kbd>←</kbd><kbd>→</kbd></div>
+            <div class="shortcut-row"><span>Nudge a calibration point</span><kbd>←</kbd><kbd>↑</kbd><kbd>↓</kbd><kbd>→</kbd></div>
+            <div class="shortcut-row"><span>Undo a calibration change</span><kbd>Ctrl</kbd><kbd>Z</kbd></div>
+            <div class="shortcut-row"><span>Close menus</span><kbd>Esc</kbd></div>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div class="progressline" id="progressLine" hidden aria-hidden="true"><span></span></div>
+
+    <!-- ============================ Workspace ============================ -->
+    <div class="workspace">
+      <div class="stage-col">
+        <section class="viewport" id="viewport" tabindex="0" aria-label="Match viewport" data-phase="empty">
+          <div class="viewport-vignette" aria-hidden="true"></div>
+
+          <!-- Empty state: drop zone -->
+          <div class="dropzone" id="dropzone" role="button" tabindex="0" aria-label="Drop a photo or clip, or press Enter to browse">
+            <svg class="drop-pitch" viewBox="0 0 1050 680" preserveAspectRatio="xMidYMid slice" aria-hidden="true">
+              <g fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="20" y="20" width="1010" height="640"></rect>
+                <line x1="525" y1="20" x2="525" y2="660"></line>
+                <circle cx="525" cy="340" r="91.5"></circle>
+                <rect x="20" y="138" width="165" height="404"></rect>
+                <rect x="20" y="248" width="55" height="184"></rect>
+                <path d="M185 267a91.5 91.5 0 0 1 0 146"></path>
+                <rect x="865" y="138" width="165" height="404"></rect>
+                <rect x="975" y="248" width="55" height="184"></rect>
+                <path d="M865 267a91.5 91.5 0 0 0 0 146"></path>
+              </g>
+              <g fill="currentColor">
+                <circle cx="525" cy="340" r="4"></circle>
+                <circle cx="130" cy="340" r="4"></circle>
+                <circle cx="920" cy="340" r="4"></circle>
+              </g>
+              <line class="drop-line" x1="742" y1="20" x2="742" y2="660"></line>
+            </svg>
+            <div class="drop-inner">
+              <div class="drop-badge" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="22" height="22" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M12 15V4M7.5 8.5L12 4l4.5 4.5"></path><path d="M4 14v4.5A1.5 1.5 0 0 0 5.5 20h13a1.5 1.5 0 0 0 1.5-1.5V14"></path></svg>
+              </div>
+              <h1>Drop a match photo or clip</h1>
+              <p class="drop-sub">One frame is enough for a call. PNG, JPG, MP4 or MOV.</p>
+              <div class="drop-actions">
+                <span class="btn primary drop-browse" aria-hidden="true">Browse files</span>
+                <button class="btn ghost drop-sample" id="mockSample" type="button" hidden>Load mock sample</button>
+              </div>
+              <p class="drop-keys">or press <kbd>Ctrl</kbd><kbd>O</kbd></p>
+            </div>
+          </div>
+
+          <!-- Photo / overlay state -->
+          <div class="photo-layer" id="photoLayer" hidden>
+            <img id="photoImg" alt="Selected match frame" draggable="false">
+            <canvas id="overlayCanvas" aria-label="Player overlay"></canvas>
+          </div>
+
+          <!-- Calibrate state -->
+          <div class="calib-layer" id="calibLayer" hidden>
+            <canvas id="calibCanvas" tabindex="0" aria-label="Photo with the pitch drawn over it. Drag points and lines onto the real pitch markings. Arrow keys nudge the selected point."></canvas>
+            <div class="view-hint calib-hint">
+              <span><b>Drag</b> a point or line onto the real marking</span><span><b>Wheel</b> zoom</span><span><b>Right-drag</b> move the photo</span>
+            </div>
+          </div>
+
+          <!-- Live 3D state -->
+          <div class="view3d-layer" id="view3dLayer" hidden>
+            <canvas id="view3dCanvas" aria-label="Live 3D offside view"></canvas>
+            <div class="view-hint" id="viewHint">
+              <span><b>Drag</b> orbit</span><span><b>Right-drag</b> pan</span><span><b>Wheel</b> zoom</span><span><b>1–4</b> views</span>
+            </div>
+            <svg class="gizmo" id="gizmo" viewBox="0 0 76 76" aria-hidden="true">
+              <circle cx="38" cy="38" r="33" fill="rgba(7,11,9,0.55)" stroke="rgba(234,242,236,0.12)" stroke-width="1"></circle>
+              <circle cx="38" cy="38" r="2" fill="rgba(234,242,236,0.6)"></circle>
+              <g id="gizmoAxes" stroke-linecap="round" font-family="IBM Plex Mono, Consolas, monospace" font-size="7.5" font-weight="600" text-anchor="middle" dominant-baseline="middle">
+                <line id="gizmoX" x1="38" y1="38" x2="62" y2="38" stroke="#ff4a3d" stroke-width="2"></line>
+                <line id="gizmoZ" x1="38" y1="38" x2="38" y2="62" stroke="#3ddc84" stroke-width="2"></line>
+                <line id="gizmoY" x1="38" y1="38" x2="38" y2="14" stroke="#9fb1a6" stroke-width="2"></line>
+                <text id="gizmoXLabel" x="65" y="41" fill="#ff4a3d">X</text>
+                <text id="gizmoZLabel" x="36" y="73" fill="#3ddc84">Z</text>
+                <text id="gizmoYLabel" x="41" y="11" fill="#9fb1a6">Y</text>
+              </g>
+            </svg>
+            <button class="reconnect-chip" id="reconnectChip" type="button" hidden>3D view disconnected · Reconnect</button>
+          </div>
+
+          <!-- Broadcast verdict graphic (decorative; the panel carries the live text) -->
+          <div class="verdict-band" id="verdictBand" data-tone="red" aria-hidden="true" hidden>
+            <div class="vb-wipe"></div>
+            <div class="vb-plate">
+              <div class="vb-tag"><span>VAR</span></div>
+              <div class="vb-body">
+                <div class="vb-call" id="vbCall">OFFSIDE</div>
+                <div class="vb-caption" id="vbCaption"></div>
+              </div>
+              <div class="vb-margin" id="vbMargin"><span class="vb-num" id="vbNum">0.00</span><span class="vb-unit">m</span></div>
+            </div>
+          </div>
+
+          <!-- Shared viewport chrome -->
+          <div class="view-toggle" id="viewToggle" role="group" aria-label="View mode" hidden>
+            <button id="viewPhotoBtn" type="button" class="is-active">Photo</button>
+            <button id="view3dBtn" type="button">3D</button>
+          </div>
+          <div class="status-chip" id="statusChip" hidden aria-live="polite"></div>
+
+          <!-- Review: attack direction, attacking team, keeper -->
+          <div class="review-card" id="reviewCard" hidden>
+            <div class="review-head">
+              <div class="review-q">Which way is the attack?</div>
+              <div class="side-keys"><kbd>←</kbd><kbd>→</kbd></div>
+            </div>
+            <div class="side-buttons">
+              <button class="side-btn" type="button" data-side="left">
+                <span class="side-arrow" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5M11 6l-6 6 6 6"></path></svg>
+                </span>
+                <span class="side-name">Left</span>
+              </button>
+              <button class="side-btn" type="button" data-side="right">
+                <span class="side-name">Right</span>
+                <span class="side-arrow" aria-hidden="true">
+                  <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>
+                </span>
+              </button>
+            </div>
+            <div class="review-row">
+              <div class="review-label">Attacking team</div>
+              <div class="review-choices">
+                <button class="choice-btn team-btn" type="button" data-team="1" aria-pressed="false">
+                  <span class="team-dot" aria-hidden="true"></span>Team 1
+                </button>
+                <button class="choice-btn team-btn" type="button" data-team="2" aria-pressed="false">
+                  <span class="team-dot" aria-hidden="true"></span>Team 2
+                </button>
+              </div>
+            </div>
+            <div class="review-row">
+              <div class="review-label">Keeper</div>
+              <div class="review-choices">
+                <div class="keeper-status" id="keeperStatus"></div>
+                <button class="choice-btn" id="notInFrameBtn" type="button" aria-pressed="false">Not in frame</button>
+              </div>
+            </div>
+            <div class="review-hint" id="reviewHint" aria-live="polite"></div>
+          </div>
+
+          <!-- Full-size debug stage -->
+          <div class="stage-lightbox" id="stageLightbox" hidden aria-label="Debug stage">
+            <img id="stageLarge" alt="">
+            <div class="lightbox-caption" id="stageCaption"></div>
+            <button class="btn ghost lightbox-close" id="stageClose" type="button">Close</button>
+          </div>
+
+          <!-- Player hover tooltip + context menu -->
+          <div class="player-tip" id="playerTip" hidden></div>
+          <div class="ctx-menu" id="ctxMenu" role="menu" hidden></div>
+        </section>
+
+        <!-- ============================ Bottom bar ============================ -->
+        <footer class="bottombar" id="bottomBar" hidden>
+          <div class="timeline" id="timeline" hidden>
+            <button class="step-btn" id="prevFrame" type="button" aria-label="Previous frame" title="Previous frame">
+              <svg viewBox="0 0 10 10" width="9" height="9" aria-hidden="true"><path d="M6.5 2L3.5 5l3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+            </button>
+            <input type="range" id="scrubber" min="0" max="0" value="0" step="1" aria-label="Video frame">
+            <button class="step-btn" id="nextFrame" type="button" aria-label="Next frame" title="Next frame">
+              <svg viewBox="0 0 10 10" width="9" height="9" aria-hidden="true"><path d="M3.5 2l3 3-3 3" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+            </button>
+            <span class="frame-counter" id="frameCounter">0000 / 0000</span>
+          </div>
+
+          <div class="camera-controls" id="cameraControls" hidden>
+            <div class="segmented" id="presetGroup" role="group" aria-label="Camera preset">
+              <button type="button" data-preset="broadcast" class="is-active" title="Broadcast (1)"><span class="key">1</span>Broadcast</button>
+              <button type="button" data-preset="birdseye" title="Bird's eye (2)"><span class="key">2</span>Bird's eye</button>
+              <button type="button" data-preset="line" title="Along the line (3)"><span class="key">3</span>Along the line</button>
+              <button type="button" data-preset="free" title="Free (4)"><span class="key">4</span>Free</button>
+            </div>
+
+            <div class="toggles" id="toggles" role="group" aria-label="View options">
+              <button type="button" class="toggle is-on" data-opt="line_plane" aria-pressed="true"><span aria-hidden="true"></span>Line plane</button>
+              <button type="button" class="toggle" data-opt="photo" aria-pressed="false"><span aria-hidden="true"></span>Photo</button>
+              <button type="button" class="toggle is-on" data-opt="labels" aria-pressed="true"><span aria-hidden="true"></span>Labels</button>
+              <button type="button" class="toggle is-on" data-opt="pulse" aria-pressed="true"><span aria-hidden="true"></span>Pulse</button>
+              <button type="button" class="toggle" data-opt="key_only" aria-pressed="false" title="Show only the last defender and the attacker, in the view, the replay and video exports"><span aria-hidden="true"></span>Key players only</button>
+            </div>
+
+            <button class="btn replay-btn" id="replayBtn" type="button" aria-pressed="false">Replay</button>
+          </div>
+        </footer>
+      </div>
+
+      <!-- ============================ Right panel ============================ -->
+      <aside class="panel" id="panel" aria-label="Analysis panel">
+        <section class="verdict-block" id="verdictBlock" data-tone="muted" aria-live="polite">
+          <div class="verdict-inner">
+            <div class="eyebrow" id="verdictEyebrow">Verdict</div>
+            <div class="verdict-main" id="verdictMain">NO FRAME YET</div>
+            <div class="verdict-figure" id="verdictFigure" hidden>
+              <span class="vf-num" id="verdictNum">0.00</span><span class="vf-unit">m</span>
+            </div>
+            <div class="verdict-sub" id="verdictSub">Drop a photo or clip to begin</div>
+            <dl class="verdict-meta" id="verdictMeta"></dl>
+          </div>
+        </section>
+
+        <section class="panel-section calib-section" id="calibPanel" hidden>
+          <div class="calib-handbox" id="calibHandBox" hidden>
+            <div class="section-label">Pitch map</div>
+            <canvas class="calib-map" id="calibMap" width="576" height="376" aria-label="Pitch map, as the broadcast camera sees it. Click a marking, then click the same spot in the photo."></canvas>
+            <p class="calib-prompt" id="calibPrompt"></p>
+            <button class="btn ghost" id="calibSkip" type="button">Can't see it, skip</button>
+          </div>
+          <p class="action-hint" id="calibHelp"></p>
+          <div class="calib-tools">
+            <button class="btn ghost" id="calibUndo" type="button">Undo</button>
+            <button class="btn ghost" id="calibReset" type="button">Reset</button>
+            <button class="btn ghost" id="calibBack" type="button">Back</button>
+          </div>
+          <button class="btn ghost" id="calibMode" type="button" hidden>Place by hand instead</button>
+          <button class="btn ghost" id="calibWithout3d" type="button" hidden>Continue without 3D</button>
+        </section>
+
+        <section class="panel-section checks-section">
+          <div class="section-label">Checks</div>
+          <ul class="checks" id="checksList" aria-label="Analysis checks"></ul>
+        </section>
+
+        <section class="panel-section actions-section">
+          <div class="section-label">Actions</div>
+          <div class="action-list" id="actionList"></div>
+          <p class="action-hint" id="actionHint">Drop a photo or clip to begin.</p>
+        </section>
+
+        <section class="steps" id="stepsDrawer" hidden>
+          <button class="steps-head" id="stepsToggle" type="button" aria-expanded="true">
+            <span class="section-label">Steps</span>
+            <svg class="steps-caret" id="stepsCaret" viewBox="0 0 10 10" width="10" height="10" aria-hidden="true"><path d="M2 3.5l3 3 3-3" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+          </button>
+          <div class="steps-body" id="stepsBody">
+            <div class="steps-grid" id="stepsGrid"></div>
+            <p class="steps-empty" id="stepsEmpty">Run Detect to see stage images.</p>
+          </div>
+        </section>
+      </aside>
+    </div>
+
+    <!-- ============================ Toasts ============================ -->
+    <div class="toasts" id="toasts" aria-live="polite" aria-label="Export progress"></div>
+
+    <input type="file" id="fileInput" accept="image/*,video/*,.mp4,.mov,.mkv,.webm" hidden>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

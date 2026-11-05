@@ -8,13 +8,14 @@ who is ahead of it, and can render a 3D replay: the reconstructed players stand
 on a real 105×68 m pitch with the offside plane drawn through the play.
 
 The package lives in [`var_offside/`](var_offside/) and ships three front-ends:
-a desktop GUI, a CLI, and an HTTP API.
+a desktop GUI, a CLI, and an HTTP API, plus a browser app with a free-moving 3D
+view. To run the browser app, see the [web app playbook](var_offside/web/README.md).
 
 ---
 
 ## Requirements
 
-- **Python 3.10+** (the automation module uses `X | None` unions).
+- **Python 3.10+**.
 - A CUDA GPU is strongly recommended — the 3D player reconstruction (SAM 3D
   Body) is slow on CPU.
 - A working OpenGL driver (the 3D replay renders with `pyrender`).
@@ -51,9 +52,6 @@ python -m venv .venv
 pip install -e .
 python scripts/verify_setup.py
 ```
-
-For the optional VLM automation, copy `var_offside/.env.example` to
-`var_offside/.env` and add your OpenRouter key.
 
 ---
 

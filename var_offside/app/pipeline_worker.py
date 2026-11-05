@@ -44,7 +44,6 @@ class PipelineWorker(QThread):
         self._attacking_side: Optional[str] = None
         self._exclude_goalkeeper: bool = True
         self._enable_team_classification: bool = False
-        self._use_automation: bool = False
         self._stop_requested = False
 
         # Run mode
@@ -64,12 +63,10 @@ class PipelineWorker(QThread):
         self,
         image: np.ndarray,
         enable_team_classification: bool = False,
-        use_automation: bool = False,
     ):
         """Configure phase 1: detection + optional grouping."""
         self._image = image
         self._enable_team_classification = enable_team_classification
-        self._use_automation = use_automation
         self._mode = "phase1"
         self._phase1_result = None
         self._edited_detections = None
@@ -155,7 +152,6 @@ class PipelineWorker(QThread):
         # -- Original (0%) --
         self.progress.emit(0, "Original image")
         self.stage_image_ready.emit("original", image)
-        self.stage_image_ready.emit("automation", None)
         if self._stop_requested:
             return
 
@@ -181,47 +177,9 @@ class PipelineWorker(QThread):
             self.phase1_complete.emit(result)
             return
 
-        raw_detections = list(result.detections)
-
-        # -- Automation / Teams (30%) --
-        automation_goalkeeper_idx = None
-        automation_excluded_indices = []
-        automation_original_goalkeeper_idx = None
-        if self._use_automation:
-            self.progress.emit(18, "Running automation...")
-            try:
-                result.automation_result = pipeline.run_automation_analysis(image)
-                (
-                    result.detections,
-                    automation_goalkeeper_idx,
-                    automation_excluded_indices,
-                    automation_original_goalkeeper_idx,
-                ) = pipeline.apply_automation_hints(
-                    image,
-                    result.detections,
-                    result.automation_result,
-                )
-                result.removed_non_player_count = len(automation_excluded_indices)
-                result.automation_goalkeeper_idx = automation_goalkeeper_idx
-                automation_img = pipeline.draw_automation_debug(
-                    image,
-                    raw_detections,
-                    automation_excluded_indices,
-                    automation_original_goalkeeper_idx,
-                )
-                self.stage_image_ready.emit("automation", automation_img)
-            except Exception as exc:
-                result.errors.append(f"Automation skipped: {exc}")
-
-        if not result.detections:
-            result.errors.append("No players detected after automation filtering")
-            result.processing_time_ms = (time.time() - start) * 1000
-            self.phase1_complete.emit(result)
-            return
-
         self.progress.emit(20, "Preparing player groups...")
 
-        if self._enable_team_classification or self._use_automation:
+        if self._enable_team_classification:
             try:
                 result.team_result = pipeline.team_assigner.assign_teams(
                     image, result.detections
@@ -232,29 +190,6 @@ class PipelineWorker(QThread):
         else:
             result.team_result = None
 
-        if automation_goalkeeper_idx is not None and automation_goalkeeper_idx < len(
-            result.detections
-        ):
-            result.detections[automation_goalkeeper_idx].is_goalkeeper = True
-            (
-                result.attacking_team,
-                result.defending_team,
-            ) = pipeline.infer_team_context_from_goalkeeper(
-                result.detections,
-                automation_goalkeeper_idx,
-            )
-            if (
-                result.attacking_team is not None
-                and result.automation_result is not None
-            ):
-                result.side_result = pipeline.side_detector.detect_with_manual_override(
-                    result.attacking_team,
-                    result.automation_result.goal_side,
-                )
-            elif self._use_automation:
-                result.errors.append(
-                    "Automation could not infer the attacking team; phase 2 will fall back unless you edit teams"
-                )
         if self._stop_requested:
             return
 
@@ -309,32 +244,21 @@ class PipelineWorker(QThread):
         gk_indices = (None, None)
         if self._exclude_goalkeeper:
             self.progress.emit(55, "Identifying goalkeepers...")
-            if (
-                result.automation_goalkeeper_idx is not None
-                and result.automation_goalkeeper_idx < len(result.detections)
-            ):
-                idx = result.automation_goalkeeper_idx
-                result.detections[idx].is_goalkeeper = True
-                if result.detections[idx].team_id == 1:
-                    gk_indices = (idx, None)
-                elif result.detections[idx].team_id == 2:
-                    gk_indices = (None, idx)
-            else:
-                h, w = image.shape[:2]
-                team_ids = None
-                if result.team_result is not None:
-                    team_ids = [d.team_id for d in result.detections]
-                gk_indices = pipeline.goalkeeper_filter.identify_goalkeepers(
-                    image,
-                    result.detections,
-                    team_ids,
-                    w,
-                    result.team_result.embeddings if result.team_result else None,
-                )
-                if gk_indices[0] is not None:
-                    result.detections[gk_indices[0]].is_goalkeeper = True
-                if gk_indices[1] is not None:
-                    result.detections[gk_indices[1]].is_goalkeeper = True
+            h, w = image.shape[:2]
+            team_ids = None
+            if result.team_result is not None:
+                team_ids = [d.team_id for d in result.detections]
+            gk_indices = pipeline.goalkeeper_filter.identify_goalkeepers(
+                image,
+                result.detections,
+                team_ids,
+                w,
+                result.team_result.embeddings if result.team_result else None,
+            )
+            if gk_indices[0] is not None:
+                result.detections[gk_indices[0]].is_goalkeeper = True
+            if gk_indices[1] is not None:
+                result.detections[gk_indices[1]].is_goalkeeper = True
         else:
             self.progress.emit(55, "Skipping goalkeepers...")
         if self._stop_requested:
@@ -361,9 +285,6 @@ class PipelineWorker(QThread):
         result.detections = list(self._edited_detections)
         result.team_result = cached.team_result
         result.calibration = cached.calibration
-        result.automation_result = cached.automation_result
-        result.automation_goalkeeper_idx = cached.automation_goalkeeper_idx
-        result.removed_non_player_count = cached.removed_non_player_count
         result.attacking_team = cached.attacking_team
         result.defending_team = cached.defending_team
 

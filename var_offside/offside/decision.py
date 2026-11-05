@@ -10,10 +10,16 @@ from var_offside.calibration.base import CalibrationResult
 from var_offside.detection.player_detector import PlayerDetection
 from var_offside.detection.body_parts import PlayableBodyPart
 from var_offside.offside.line_calculator import (
+    HALFWAY_X_M,
     OffsideLine,
+    attack_field_sign,
     get_directional_ground_point,
     project_detection_to_field,
+    x_on_ray_at_row,
 )
+
+# Pitch points carry float error; on the halfway line counts as the own half.
+_ON_HALFWAY_M = 1e-6
 
 
 @dataclass
@@ -41,6 +47,9 @@ class PlayerOffsideStatus:
     # Distance past the line in metres (set by the 3D mesh-based method, which
     # measures the furthest-forward body point rather than the bbox corner).
     margin_m: Optional[float] = None
+
+    # In their own half, so never offside whatever the line says
+    in_own_half: bool = False
 
 
 @dataclass
@@ -102,14 +111,22 @@ class OffsideDecision:
     Evaluate players relative to a detected line.
     """
 
-    def __init__(self, margin_tolerance_px: int = 3):
+    def __init__(
+        self,
+        margin_tolerance_px: int = 3,
+        margin_tolerance_m: float = 0.0,
+    ):
         """
         Initialize line-relative decision maker.
 
         Args:
-            margin_tolerance_px: Tolerance in pixels (for "on the line" cases)
+            margin_tolerance_px: "On the line" tolerance when players are
+                compared in image pixels (no pitch calibration).
+            margin_tolerance_m: "On the line" tolerance when players are
+                compared in pitch metres (calibrated frames).
         """
         self.margin_tolerance = margin_tolerance_px
+        self.margin_tolerance_m = margin_tolerance_m
 
     def evaluate(
         self,
@@ -141,7 +158,11 @@ class OffsideDecision:
             defending_team=defending_team,
         )
 
-        # Evaluate only attacking players when team context is available.
+        sign = offside_line.attack_field_sign
+        if sign is None:
+            sign = attack_field_sign(detections, attacking_side, calibration)
+
+        # Only attacking players are evaluated, and only with team context.
         for i, det in enumerate(detections):
             if i == offside_line.defining_player_idx:
                 continue
@@ -162,6 +183,7 @@ class OffsideDecision:
                 offside_line,
                 attacking_side,
                 calibration,
+                sign,
             )
             result.player_statuses.append(status)
 
@@ -185,7 +207,7 @@ class OffsideDecision:
         if defending_team in (1, 2) and detection.team_id in (1, 2):
             return detection.team_id != defending_team
 
-        return True
+        return False
 
     def _evaluate_player(
         self,
@@ -194,6 +216,7 @@ class OffsideDecision:
         offside_line: OffsideLine,
         attacking_side: str,
         calibration: Optional[CalibrationResult],
+        field_sign: Optional[int],
     ) -> PlayerOffsideStatus:
         """
         Evaluate a single player's position relative to the line.
@@ -203,39 +226,51 @@ class OffsideDecision:
             player_idx: Index in detections list
             offside_line: Offside line
             attacking_side: Attack direction
+            calibration: Optional field calibration
+            field_sign: Direction of the attacked goal along pitch x, if known
 
         Returns:
             PlayerOffsideStatus
         """
-        # Geometry mode compares players using the direction-aligned ground point.
-        most_advanced = None
-        advanced_x = float(get_directional_ground_point(detection, attacking_side)[0])
-        confidence = float(detection.confidence)
+        point = get_directional_ground_point(detection, attacking_side)
 
-        field_point = project_detection_to_field(detection, attacking_side, calibration)
+        field_point = None
+        if field_sign is not None:
+            field_point = project_detection_to_field(
+                detection, attacking_side, calibration
+            )
+
+        in_own_half = bool(
+            field_point is not None
+            and (field_point[0] - HALFWAY_X_M) * field_sign <= _ON_HALFWAY_M
+        )
+
         if field_point is not None and offside_line.field_x is not None:
+            # Both positions are pitch metres, so the tolerance must be too.
             advanced_x = float(field_point[0])
-            line_x = offside_line.field_x
+            margin = (advanced_x - offside_line.field_x) * field_sign
+            tolerance = self.margin_tolerance_m
         else:
+            advanced_x = float(point[0])
             line_x = offside_line.image_x
-
-        if attacking_side == "left":
-            # Attacking left, ahead if player x is smaller than line x.
-            margin = line_x - advanced_x
-        else:
-            # Attacking right, ahead if player x is larger than line x.
-            margin = advanced_x - line_x
-
-        is_offside = margin > self.margin_tolerance
+            vanishing_point = calibration.vanishing_point if calibration else None
+            if vanishing_point is not None:
+                # The drawn line slants, so read it at this player's row.
+                line_x = x_on_ray_at_row(
+                    offside_line.reference_point, vanishing_point, point[1]
+                )
+            margin = line_x - advanced_x if attacking_side == "left" else advanced_x - line_x
+            tolerance = self.margin_tolerance
 
         return PlayerOffsideStatus(
             player_idx=player_idx,
             player_detection=detection,
-            is_offside=is_offside,
-            most_advanced_part=most_advanced,
+            is_offside=bool(margin > tolerance) and not in_own_half,
+            most_advanced_part=None,
             advanced_x=advanced_x,
             margin_px=margin,
-            confidence=confidence,
+            confidence=float(detection.confidence),
+            in_own_half=in_own_half,
         )
 
     def get_summary(self, result: OffsideResult) -> str:

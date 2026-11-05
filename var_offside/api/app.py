@@ -27,16 +27,15 @@ async def analyze_image(
     file: UploadFile = File(...),
     attacking_side: Optional[str] = Form(None),
     calibration_method: str = Form("auto"),
-    use_automation: bool = Form(False),
 ) -> dict:
     """
     Analyze a single broadcast image and return the line player plus players
     ahead of that line.
     """
-    if not use_automation and attacking_side not in ("left", "right"):
+    if attacking_side not in ("left", "right"):
         raise HTTPException(
             status_code=400,
-            detail="attacking_side must be 'left' or 'right' unless use_automation=true",
+            detail="attacking_side must be 'left' or 'right'",
         )
 
     if not file.filename:
@@ -49,7 +48,6 @@ async def analyze_image(
             image_bytes=image_bytes,
             attacking_side=attacking_side,
             calibration_method=calibration_method,
-            use_automation=use_automation,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

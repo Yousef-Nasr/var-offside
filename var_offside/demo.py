@@ -35,14 +35,8 @@ def parse_args():
         "--attacking-side",
         type=str,
         choices=["left", "right"],
-        required=False,
-        help="Attacking direction. Optional when --use-automation is enabled.",
-    )
-
-    parser.add_argument(
-        "--use-automation",
-        action="store_true",
-        help="Use VLM automation to infer side and filter goalkeeper/non-players.",
+        required=True,
+        help="Attacking direction.",
     )
 
     parser.add_argument(
@@ -85,10 +79,6 @@ def main():
     print(f"Loading image: {args.image}")
     print(f"Calibration method: {args.method}")
 
-    if not args.use_automation and args.attacking_side not in ("left", "right"):
-        print("Error: --attacking-side is required unless --use-automation is enabled")
-        return 1
-
     # Initialize pipeline
     print("\nInitializing pipeline...")
     pipeline = OffsidePipeline(calibration_method=args.method)
@@ -99,7 +89,6 @@ def main():
     result = pipeline.analyze(
         args.image,
         attacking_side=args.attacking_side,
-        use_automation=args.use_automation,
         generate_visualization=True,
         save_result=True,
         output_path=args.output,
