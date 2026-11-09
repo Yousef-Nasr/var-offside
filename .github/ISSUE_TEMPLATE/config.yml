@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Documentation
+    url: https://yousef-nasr.github.io/var-offside/
+    about: Installation, models, the web app and troubleshooting.
+  - name: Security vulnerability
+    url: https://github.com/Yousef-Nasr/var-offside/security/advisories/new
+    about: Report security problems privately, not as a public issue.

@@ -15,6 +15,7 @@ DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
 DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_MAX_COST_USD = 0.50
 DEFAULT_MAX_CALLS = 20
+DEFAULT_STAGE = 1
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,7 @@ class AgentConfig:
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS
     max_cost_usd: float = DEFAULT_MAX_COST_USD
     max_calls: int = DEFAULT_MAX_CALLS
+    auto_review_stage: int = DEFAULT_STAGE  # Rollout stage, 1 to 4. At 1, every result needs checking.
 
     @property
     def vision_available(self) -> bool:
@@ -50,4 +52,5 @@ def load_config(
         model=text("OPENROUTER_MODEL_ID"),
         max_cost_usd=float(text("OPENROUTER_MAX_COST_USD") or DEFAULT_MAX_COST_USD),
         max_calls=int(text("OPENROUTER_MAX_CALLS") or DEFAULT_MAX_CALLS),
+        auto_review_stage=int(text("AUTO_REVIEW_STAGE") or DEFAULT_STAGE),
     )

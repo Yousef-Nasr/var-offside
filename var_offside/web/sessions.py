@@ -6,8 +6,7 @@ temporary directory, the current frame can be decoded on demand and the phase
 results plus debug stage images are kept in memory.  Sessions are process-local
 and are never persisted; restarting the server drops them.
 
-Video reading uses OpenCV directly (the desktop app's ``VideoHandler`` is a Qt
-wrapper around the same API).  A per-session lock serialises frame access and a
+Video reading uses OpenCV directly.  A per-session lock serialises frame access and a
 single-worker executor is kept for the live 3D scene, whose pyrender/OpenGL
 context is thread-bound.
 """
@@ -118,6 +117,11 @@ class Session:
     stages: Dict[str, np.ndarray] = field(default_factory=dict)
     calibration: CalibrationState = field(default_factory=CalibrationState)
 
+    # Goes up whenever the scene changes, so an old correction can't apply to a new scene.
+    revision: int = 0
+    analysis_choices: Any = None
+    auto_review: Any = None  # The latest Auto-review run on this frame.
+
     # Threading / live 3D state
     lock: threading.RLock = field(default_factory=threading.RLock)
     view_executor: ThreadPoolExecutor = field(default_factory=lambda: RENDER_THREAD)
@@ -162,8 +166,15 @@ class Session:
             if index != self.frame_index:
                 # Broadcast cameras move, so each frame starts from the automatic result.
                 self.calibration = CalibrationState()
+                self.revision += 1
             self.frame_index = index
             return index
+
+    def bump_revision(self) -> int:
+        """Record that the scene changed and return the new revision."""
+        with self.lock:
+            self.revision += 1
+            return self.revision
 
     def set_stages(self, stages: Optional[Dict[str, np.ndarray]]) -> None:
         """Store or replace debug stage images."""
@@ -179,17 +190,33 @@ class Session:
                 self.stages.pop(key, None)
 
     def close(self) -> None:
-        """Release the video capture and close the live scene."""
+        """Delete everything this session holds: the file, results, meshes and any run."""
         with self.lock:
             if self.reader is not None:
                 self.reader.release()
                 self.reader = None
             scene = self.view_scene
             self.view_scene = None
+            run = self.auto_review
+            self.auto_review = None
+            # The body meshes are cached on these results, so they go too.
+            self.phase1_result = None
+            self.phase2_result = None
+            self.stages.clear()
+            self.image = None
+            self.calibration = CalibrationState()
+            self.analysis_choices = None
+            self.revision += 1
+        if run is not None:
+            run.stop()
         if scene is not None:
             # GL contexts are thread-bound: close on the thread that made it.
             future = self.view_executor.submit(scene.close)
             future.add_done_callback(_log_close_failure)
+        try:
+            Path(self.path).unlink(missing_ok=True)
+        except OSError as exc:
+            logger.warning("Could not delete %s: %s", self.path, exc)
 
 
 class SessionStore:

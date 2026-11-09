@@ -1,0 +1,109 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "var-offside"
+version = "0.1.0"
+description = "Offside detection for football broadcast frames, with pitch calibration and a live 3D VAR-style view in the browser."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "Yousef Nasr" }]
+keywords = [
+    "football",
+    "soccer",
+    "offside",
+    "var",
+    "computer-vision",
+    "camera-calibration",
+    "pose-estimation",
+    "sports-analytics",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+dependencies = [
+    # Core pipeline
+    "numpy>=1.24",
+    "opencv-python>=4.8",
+    "torch>=2.1",
+    "torchvision>=0.16",
+    "ultralytics>=8.3",
+    "scikit-learn>=1.3",
+    "scipy>=1.10",
+    "Pillow>=9.0",
+    "PyYAML>=6.0",
+    # Web app
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.7",
+    # 3D view, replay and video exports
+    "trimesh>=4.0",
+    "pyrender>=0.1.45",
+    "imageio-ffmpeg>=0.5",
+    # SAM 3D Body runtime (its code is cloned into third_party/, see docs)
+    "pytorch-lightning>=2.0",
+    "timm>=0.9",
+    "einops>=0.7",
+    "yacs>=0.1.8",
+    "roma>=1.4",
+    "omegaconf>=2.3",
+    "braceexpand>=0.1.7",
+    "huggingface_hub>=0.23",
+    # Auto-review (optional at runtime, needs an OpenRouter key)
+    "requests>=2.31",
+    "python-dotenv>=1.0",
+]
+
+[project.optional-dependencies]
+umap = ["umap-learn>=0.5"]
+dev = ["pytest>=7.4", "pytest-cov>=4.1", "httpx>=0.27", "ruff>=0.6", "pre-commit>=3.5"]
+docs = ["mkdocs-material>=9.5"]
+all = ["var-offside[umap]"]
+
+[project.scripts]
+var-offside = "var_offside.demo:main"
+var-offside-web = "var_offside.web.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/Yousef-Nasr/var-offside"
+Documentation = "https://yousef-nasr.github.io/var-offside/"
+Issues = "https://github.com/Yousef-Nasr/var-offside/issues"
+Changelog = "https://github.com/Yousef-Nasr/var-offside/blob/main/CHANGELOG.md"
+
+[tool.setuptools.packages.find]
+include = ["var_offside*"]
+
+[tool.setuptools.package-data]
+var_offside = ["web/static/*", ".env.example"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
+markers = [
+    "weights: needs model weights in weights/ (skipped in CI)",
+    "gpu: needs a CUDA GPU (skipped in CI)",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+extend-exclude = ["third_party", "weights"]
+
+[tool.ruff.lint]
+# Start with errors that are bugs; widen once the codebase is formatted.
+select = ["E9", "F63", "F7", "F82", "F401"]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]

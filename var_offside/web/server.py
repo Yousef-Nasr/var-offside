@@ -2,7 +2,7 @@
 FastAPI server for the browser-based VAR offside app.
 
 All HTTP routes live under ``/api`` exactly as documented in
-``var_offside/web/API_CONTRACT.md``.  The static frontend is mounted at ``/``
+``docs/reference/web-api.md``.  The static frontend is mounted at ``/``
 when ``var_offside/web/static/`` exists.  The live 3D WebSocket is optional: the
 ``LiveScene`` class is imported lazily inside the handler so this module and its
 tests keep working even when ``live3d.py`` is absent or broken.
@@ -31,6 +31,7 @@ from starlette.concurrency import run_in_threadpool
 from var_offside.calibration.base import CalibrationResult
 from var_offside.config import get_settings
 from var_offside.web import jobs, phases, sessions
+from var_offside.web.auto_review_routes import router as auto_review_router
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,7 @@ app = FastAPI(
     version="1.0.0",
     description="Browser front end for the VAR offside pipeline.",
 )
+app.include_router(auto_review_router)
 
 
 # ---------------------------------------------------------------------------
@@ -194,6 +196,8 @@ def _run_detect(session: sessions.Session) -> Dict[str, Any]:
         session.phase1_result = result
         session.phase2_result = None
         session.stages = dict(stages)
+        session.analysis_choices = None
+        session.bump_revision()
 
     # Ready, ideally, by the time the review is done.
     _start_calibration(session)
@@ -213,6 +217,7 @@ def _run_player_edits(session: sessions.Session, players: List[Dict[str, Any]]) 
     with session.lock:
         session.set_stages(stages)
         session.clear_analysis()
+        session.bump_revision()
 
     return phases.serialize_phase1(result, _available_stages(session))
 
@@ -234,8 +239,12 @@ def _run_analyze(
     result.attacking_team = attacking_team if known_team else None
     result.defending_team = (3 - attacking_team) if known_team else None
     result.keeper_choice = keeper if keeper in ("player", "not_in_frame") else None
+    choices = (attacking_side, result.attacking_team, result.keeper_choice)
     with session.lock:
         session.clear_analysis()
+        if choices != session.analysis_choices:
+            session.analysis_choices = choices
+            session.bump_revision()
 
     choice_error = phases.analysis_choice_error(result)
     if choice_error is not None:
@@ -297,6 +306,15 @@ async def create_session(file: UploadFile = File(...)) -> Dict[str, Any]:
         logger.exception("Creating session failed")
         raise HTTPException(status_code=500, detail=f"Upload failed: {exc}") from exc
     return _session_payload(session)
+
+
+@app.delete("/api/sessions/{session_id}")
+def delete_session(session_id: str) -> Dict[str, str]:
+    """Delete a session and everything made from it, including its exports."""
+    _get_session(session_id)
+    jobs.manager.delete_for_session(session_id)
+    sessions.store.close(session_id)
+    return {"status": "deleted"}
 
 
 @app.get("/api/sessions/{session_id}/frame.jpg")
@@ -403,6 +421,7 @@ def apply_calibration(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     with session.lock:
         session.clear_analysis()
+        session.bump_revision()
     return session.calibration.payload(int(session.width), int(session.height))
 
 
@@ -413,6 +432,7 @@ def reset_calibration(session_id: str) -> Dict[str, Any]:
     session.calibration.revert()
     with session.lock:
         session.clear_analysis()
+        session.bump_revision()
     return session.calibration.payload(int(session.width), int(session.height))
 
 
@@ -494,6 +514,8 @@ def export(session_id: str, payload: Optional[ExportBody] = None) -> Dict[str, s
             "verdict": phases.serialize_verdict(phase2) if phase2 is not None else None,
             "calibration": session.calibration.report(),
         }
+        if session.auto_review is not None and session.auto_review.record is not None:
+            report["auto_review"] = session.auto_review.record
 
     job = jobs.manager.start(
         kind=kind,

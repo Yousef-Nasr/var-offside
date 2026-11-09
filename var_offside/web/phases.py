@@ -1,11 +1,9 @@
 """
-Qt-free pipeline phases for the browser app.
+Pipeline phases for the browser app.
 
-The desktop application runs its two-phase pipeline inside a ``QThread``
-(:mod:`var_offside.app.pipeline_worker`).  The web server cannot use Qt, so the
-same logic is copied here as plain functions returning ``(AnalysisResult,
-stages)`` tuples.  Nothing in this module imports Qt and the desktop app is not
-modified.
+The same components as :class:`var_offside.pipeline.OffsidePipeline`, run as
+separate steps so the user can review between them. Each phase is a plain
+function returning ``(AnalysisResult, stages)`` tuples.
 
 Phase 1 performs detection and team classification (always on).  The keeper, the
 attacking team and the attack direction are the user's choices in Review, and
@@ -15,7 +13,7 @@ Phase 2 then uses that calibration for the offside line and the verdict.
 ``apply_player_edits`` rebuilds detections after the user reviews the players.
 
 The JSON helpers at the bottom of the module produce exactly the ``Phase1`` and
-``Verdict`` shapes documented in ``var_offside/web/API_CONTRACT.md``.
+``Verdict`` shapes documented in ``docs/reference/web-api.md``.
 """
 
 from __future__ import annotations
@@ -30,6 +28,7 @@ import numpy as np
 from var_offside.calibration.base import CalibrationResult
 from var_offside.config import get_settings
 from var_offside.detection import PlayerDetection
+from var_offside.detection.player_detector import BallDetection
 from var_offside.offside.line_calculator import (
     OffsideLine,
     attack_field_sign,
@@ -69,9 +68,7 @@ def get_pipeline() -> OffsidePipeline:
     """Return the lazily created, process-wide :class:`OffsidePipeline`.
 
     Loading the pipeline is expensive (models are loaded on first use), so it is
-    created once and shared by every request.  Mirrors
-    :func:`var_offside.api.service.get_pipeline` but without request-specific
-    keys: the web app always runs the default ``auto`` calibration on the device
+    created once and shared by every request.  The web app always runs the default ``auto`` calibration on the device
     configured in :func:`var_offside.config.get_settings`.
     """
     global _PIPELINE
@@ -125,6 +122,13 @@ def run_phase1(
         result.detections = pipeline.player_detector.detect(image)
     except Exception as exc:  # noqa: BLE001 - surface the message to the client
         raise RuntimeError(f"Detection failed: {exc}") from exc
+
+    # Ids are stable from here on: edits keep them, and new players get new ones.
+    for index, detection in enumerate(result.detections):
+        detection.player_id = index
+    result.next_player_id = len(result.detections)
+    ball = getattr(pipeline.player_detector, "last_ball", None)
+    result.ball = ball if isinstance(ball, BallDetection) else None
 
     stages["detection"] = pipeline._draw_detections_debug(  # noqa: SLF001
         image, result.detections, "Detections"
@@ -193,8 +197,15 @@ def apply_player_edits(
         raise ValueError("Run detection before editing players")
 
     image = result.image
-    old_detections = list(result.detections)
+    known = {
+        _player_key(detection, index): (index, detection)
+        for index, detection in enumerate(result.detections)
+    }
+    next_id = max([result.next_player_id, *(key + 1 for key in known)])
+    old_embeddings = _aligned_embeddings(result)
     edited: List[PlayerDetection] = []
+    old_rows: List[Optional[int]] = []
+    used_ids = set()
 
     for order, payload in enumerate(players):
         bbox = _normalize_bbox(payload.get("bbox"), image.shape)
@@ -202,7 +213,20 @@ def apply_player_edits(
             logger.warning("Skipping player %d: invalid bbox %r", order, payload.get("bbox"))
             continue
 
-        base = _base_detection(old_detections, payload.get("id"))
+        player_id = payload.get("id")
+        old_index, base = None, None
+        if (
+            isinstance(player_id, int)
+            and not isinstance(player_id, bool)
+            and player_id in known
+            and player_id not in used_ids
+        ):
+            old_index, base = known[player_id]
+        else:
+            player_id = next_id
+            next_id += 1
+        used_ids.add(player_id)
+
         role = payload.get("role") or "player"
         team = payload.get("team")
         if role == "referee":
@@ -226,22 +250,31 @@ def apply_player_edits(
                 if base is not None and _same_box(base.bbox, bbox)
                 else None
             ),
-            player_id=order,
+            player_id=player_id,
             team_id=team,
             is_goalkeeper=(role == "goalkeeper"),
+            detector_class=base.detector_class if base is not None else None,
         )
         # ``referee`` is not a field on PlayerDetection; keep it as an extra
         # attribute so it round-trips through serialization.
         detection.is_referee = role == "referee"
         edited.append(detection)
+        old_rows.append(old_index)
 
     result.detections = edited
+    result.next_player_id = next_id
 
     if result.team_result is not None:
         result.team_result.detections = edited
-        embeddings = result.team_result.embeddings
-        if embeddings is not None and len(embeddings) != len(edited):
+        if old_embeddings is None:
             result.team_result.embeddings = None
+        else:
+            # Rows follow their players. An added player has no embedding: all zeros.
+            rows = np.zeros((len(edited), old_embeddings.shape[1]), dtype=old_embeddings.dtype)
+            for row, old_index in enumerate(old_rows):
+                if old_index is not None:
+                    rows[row] = old_embeddings[old_index]
+            result.team_result.embeddings = rows
 
     # Player edits invalidate any previous analysis.  The calibration stays: it
     # depends on the frame, not on the players.
@@ -259,14 +292,21 @@ def _same_box(first: Sequence[float], second: Sequence[float]) -> bool:
     return all(abs(float(a) - float(b)) < 1.0 for a, b in zip(first, second))
 
 
-def _base_detection(
-    detections: Sequence[PlayerDetection], player_id: Any
-) -> Optional[PlayerDetection]:
-    """Return the previous detection referenced by ``player_id`` if any."""
-    if isinstance(player_id, bool) or not isinstance(player_id, int):
-        return None
-    if 0 <= player_id < len(detections):
-        return detections[player_id]
+def _player_key(detection: PlayerDetection, index: int) -> int:
+    """A player's stable id, or its list position when it has none yet."""
+    return detection.player_id if detection.player_id is not None else index
+
+
+def _aligned_embeddings(result: AnalysisResult) -> Optional[np.ndarray]:
+    """Team embeddings when they have one row per current detection."""
+    team_result = result.team_result
+    embeddings = getattr(team_result, "embeddings", None)
+    if (
+        isinstance(embeddings, np.ndarray)
+        and embeddings.ndim == 2
+        and len(embeddings) == len(result.detections)
+    ):
+        return embeddings
     return None
 
 
@@ -474,14 +514,9 @@ def _draw_offside_stage(
 def _draw_birdseye(result: AnalysisResult) -> Optional[np.ndarray]:
     """Render a bird's eye view of the pitch with players.
 
-    Copied from :meth:`var_offside.app.pipeline_worker.PipelineWorker._draw_birdseye`.
-    Returns ``None`` when the optional ``birdseye_var`` package or a usable
-    field projection is unavailable.
+    Returns ``None`` when there is no usable field projection.
     """
-    try:
-        from birdseye_var.pitch import PitchDrawer
-    except ImportError:
-        return None
+    from var_offside.visualization.pitch_drawer import PitchDrawer
 
     calibration = getattr(result, "calibration", None)
     if calibration is None or not calibration.is_valid:
@@ -549,7 +584,7 @@ def serialize_player(index: int, detection: PlayerDetection) -> Dict[str, Any]:
         role = "goalkeeper"
 
     return {
-        "id": index,
+        "id": _player_key(detection, index),
         "bbox": [float(value) for value in detection.bbox],
         "team": detection.team_id if detection.team_id in (1, 2) else None,
         "role": role,
@@ -612,7 +647,7 @@ def serialize_verdict(
         line = getattr(offside_result, "offside_line", None)
 
     attacking_side = _attacking_side(result, offside_result)
-    margin_m = _margin_m(result, offside_result, line, attacking_side)
+    margin_m = verdict_margin_m(result)
     rejected = bool((getattr(calibration, "debug_info", None) or {}).get("rejected"))
 
     if offside_result is None or line is None:
@@ -620,7 +655,7 @@ def serialize_verdict(
         offside_ids: List[int] = []
     else:
         verdict = "offside" if bool(offside_result.any_offside) else "onside"
-        offside_ids = [int(index) for index in offside_result.offside_player_indices]
+        offside_ids = [_id_at(result, int(index)) for index in offside_result.offside_player_indices]
 
     estimate = verdict != "unknown" and (
         not full_3d or method == "vanishing_point"
@@ -783,6 +818,22 @@ def _attacking_side(result: AnalysisResult, offside_result: Any) -> Optional[str
     return None
 
 
+def verdict_margin_m(result: AnalysisResult) -> Optional[float]:
+    """The call's signed margin in metres (+ = attacker ahead), or ``None``.
+
+    The verdict panel, the live 3D label and the replay caption all show this
+    one number.  Body meshes only drive the picture: a mesh is planted by its
+    whole silhouette, so measuring it again would give a second, different
+    number for the same call.
+    """
+    offside_result = getattr(result, "offside_result", None)
+    line = getattr(result, "offside_line", None)
+    if line is None and offside_result is not None:
+        line = getattr(offside_result, "offside_line", None)
+    attacking_side = _attacking_side(result, offside_result)
+    return _margin_m(result, offside_result, line, attacking_side)
+
+
 def _margin_m(
     result: AnalysisResult,
     offside_result: Any,
@@ -836,6 +887,13 @@ def _margin_m(
     return round(max(margins), 3)
 
 
+def _id_at(result: AnalysisResult, index: int) -> int:
+    """The stable id of the player at a list position."""
+    if 0 <= index < len(result.detections):
+        return _player_key(result.detections[index], index)
+    return index
+
+
 def _last_defender(
     line: Optional[OffsideLine], result: AnalysisResult
 ) -> Dict[str, Any]:
@@ -852,7 +910,7 @@ def _last_defender(
         if isinstance(part, str):
             part = part.replace("_", " ").lower()
 
-    return {"id": int(line.defining_player_idx), "part": part}
+    return {"id": _id_at(result, int(line.defining_player_idx)), "part": part}
 
 
 def _line_image_points(

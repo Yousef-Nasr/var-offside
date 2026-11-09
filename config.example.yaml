@@ -1,0 +1,85 @@
+# VAR-Offside configuration
+#
+# Copy this file to `config.yaml` in the project folder and change what you need.
+# Every setting is optional: anything you leave out keeps its built-in default,
+# shown here. A misspelt setting stops the app with an error naming it.
+#
+# Use another file with `var-offside-web --config path/to/file.yaml`
+# or the VAR_OFFSIDE_CONFIG environment variable.
+#
+# Secrets (the OpenRouter key for Auto-review) do not go here. They go in
+# var_offside/.env, see var_offside/.env.example.
+
+# Compute device: auto, cuda, cuda:1, cpu. "auto" uses CUDA when available.
+device: auto
+
+# Where exports are written. Relative paths are relative to the project folder.
+output_dir: results
+
+# Web app server. Command-line flags win over these.
+server:
+  host: 127.0.0.1        # 0.0.0.0 exposes the app, which has no login, to your network
+  port: 8765
+  open_browser: true
+
+# Model files. Only set these if your files are somewhere other than the
+# standard layout in docs/getting-started/models.md. A bare name is looked up in
+# weights/ (then third_party/, then the project folder); absolute paths are used as given.
+# models:
+#   yolo_pose: yolo11x-pose.pt           # Ultralytics downloads this one if missing
+#   yolo_detection: best_tuned.pt        # VAR-Offside detector: ball, goalkeeper, player, referee
+#   pnl_keypoints: pnlcalib/SV_kp        # PnLCalib keypoint weights
+#   pnl_lines: pnlcalib/SV_lines         # PnLCalib line weights
+
+# Player detection
+detection:
+  confidence_threshold: 0.25
+  iou_threshold: 0.45
+  min_player_height: 30     # pixels; smaller boxes are ignored
+  max_players: 30
+
+# Pose keypoints below this confidence are ignored
+pose:
+  keypoint_confidence_threshold: 0.3
+
+# Team clustering
+teams:
+  num_teams: 2
+  jersey_crop_ratio: 0.7    # share of the box (from the top) used for kit colour
+
+# Classical calibration fallback (vanishing point)
+calibration:
+  green_lower: [35, 40, 40]     # HSV range of the grass
+  green_upper: [85, 255, 255]
+  hough_threshold: 100
+  min_line_length: 100
+  max_line_gap: 10
+  ransac_iterations: 1000
+  inlier_threshold: 5.0
+
+# Offside decision
+offside:
+  line_margin_px: 3         # tolerance when no calibration is available (pixels)
+  field_length: 105.0       # metres
+  field_width: 68.0
+  mesh_anchor: directional  # directional | center (3D mesh method only)
+
+# Colours on exported images, BGR
+visualization:
+  team1_color: [255, 0, 0]
+  team2_color: [0, 0, 255]
+  goalkeeper_color: [0, 255, 255]
+  offside_line_color: [0, 0, 255]
+  onside_line_color: [0, 255, 0]
+  line_thickness: 2
+  font_scale: 0.6
+
+# 3D view and replay (real bodies need the SAM 3D Body checkpoint)
+var_3d:
+  # sam3d_checkpoint: sam-3d-body-dinov3/model.ckpt
+  # sam3d_config: sam-3d-body-dinov3/model_config.yaml
+  # sam3d_mhr: sam-3d-body-dinov3/assets/mhr_model.pt
+  # sam3d_yolo: yolo11l.pt
+  video_fps: 30
+  video_width: 1280
+  video_height: 720

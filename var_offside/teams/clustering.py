@@ -4,7 +4,7 @@ K-Means clustering for team assignment.
 
 import numpy as np
 from sklearn.cluster import KMeans
-from typing import Optional, Tuple, List
+from typing import Optional, List
 from dataclasses import dataclass
 
 from var_offside.config import get_settings

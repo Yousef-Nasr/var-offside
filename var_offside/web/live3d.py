@@ -1925,11 +1925,17 @@ class LiveScene:
         if self._player_is_offside(idx):
             parts.append(("OFFSIDE", TEAM_BGR[1], white))
         fp = self._player_field.get(idx)
-        if idx in self._key_players and fp is not None and self._offside_field_x is not None:
-            if self._attacking_side == "left":
-                distance = self._offside_field_x - fp[0]
-            else:
-                distance = fp[0] - self._offside_field_x
+        sign = self._attack_sign()
+        if (
+            idx in self._key_players
+            and fp is not None
+            and self._offside_field_x is not None
+            and sign is not None
+        ):
+            # Same sign convention as the decision, so a reverse-angle camera
+            # doesn't show a negative distance for an offside attacker, and the
+            # same rounding as the panel, so both show the same digits.
+            distance = round((fp[0] - self._offside_field_x) * sign, 3)  # as the panel rounds it
             parts.append((f"{distance:+.2f} m", plate, white))
         return tuple(parts)
 
@@ -1977,30 +1983,29 @@ class LiveScene:
     # ------------------------------------------------------------------
 
     def _gap_metres(self) -> Optional[float]:
-        """Signed distance of the most advanced attacker past the line (m)."""
-        if self._offside_field_x is None or self._attacking_side not in ("left", "right"):
-            return None
+        """The call's margin in metres (+ = attacker ahead), as the verdict panel shows it.
 
-        att_idx = self._attacker_idx()
-        planted = self._planted_meshes.get(att_idx) if att_idx is not None else None
-        if planted is not None:
-            v_world, pm = planted
-            try:
-                lead_x, _ = self._viz._lead_point(
-                    v_world, pm, self._attacking_side
-                )
-                if self._attacking_side == "left":
-                    return float(self._offside_cx - lead_x)
-                return float(lead_x - self._offside_cx)
-            except Exception:  # noqa: BLE001 - fall back to the field position
-                pass
+        The body mesh is planted by its whole silhouette and only drives the
+        picture (gap bar, glow).  Measuring the arm-free mesh again gave a
+        second number for the same call (1.17 m against the panel's 1.26 m).
+        ``None`` when there is no full-3D margin, exactly like the panel.
+        """
+        # Imported here: phases pulls in the whole pipeline.
+        from var_offside.web.phases import verdict_margin_m
 
-        fp = self._player_field.get(att_idx) if att_idx is not None else None
-        if fp is None:
-            return None
-        if self._attacking_side == "left":
-            return float(self._offside_field_x - fp[0])
-        return float(fp[0] - self._offside_field_x)
+        return verdict_margin_m(self.result)
+
+    def _attack_sign(self) -> Optional[int]:
+        """+1 or -1: the direction of the attacked goal along pitch x, as the decision uses it."""
+        line = getattr(self.offside_result, "offside_line", None)
+        sign = getattr(line, "attack_field_sign", None)
+        if sign is None and self._attacking_side in ("left", "right"):
+            from var_offside.offside.line_calculator import attack_field_sign
+
+            sign = attack_field_sign(
+                self.result.detections, self._attacking_side, self.calibration
+            )
+        return sign
 
     # ------------------------------------------------------------------
     # Misc

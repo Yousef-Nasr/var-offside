@@ -1,0 +1,18 @@
+cff-version: 1.2.0
+message: "If you use VAR-Offside in your work, please cite it as below."
+title: "VAR-Offside: offside detection for football broadcast frames"
+type: software
+authors:
+  - family-names: Nasr
+    given-names: Yousef
+repository-code: "https://github.com/Yousef-Nasr/var-offside"
+url: "https://yousef-nasr.github.io/var-offside/"
+license: AGPL-3.0-or-later
+version: 0.1.0
+keywords:
+  - football
+  - offside
+  - computer vision
+  - camera calibration
+  - pose estimation
+  - 3D human mesh recovery

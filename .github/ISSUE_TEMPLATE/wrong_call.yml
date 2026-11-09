@@ -1,0 +1,49 @@
+name: Wrong call
+description: The app gave an offside decision you believe is wrong.
+labels: [wrong-call]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Wrong calls are the most useful reports we get. Please check the players, keeper, direction and pitch lines first:
+        most wrong calls come from one of those, and you can fix them in the review and calibration steps.
+
+        **Only attach a frame if you have the right to share it.** Otherwise attach the exported `report.json` (Export → Report), which has no image.
+  - type: dropdown
+    id: got
+    attributes:
+      label: Verdict the app gave
+      options: [Offside, Onside, Estimate (offside), Estimate (onside), No call, Too close]
+    validations:
+      required: true
+  - type: dropdown
+    id: expected
+    attributes:
+      label: Verdict you expected
+      options: [Offside, Onside, Too close to call]
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: Why
+      description: Which player set the line, and which attacker was wrongly judged? An official VAR decision, if there was one, helps too.
+    validations:
+      required: true
+  - type: dropdown
+    id: calibration
+    attributes:
+      label: Calibration status shown
+      options: [AUTO FIT, WEAK AUTO FIT, ADJUSTED, GOOD FIT, WEAK FIT, 2D ONLY, Other]
+  - type: checkboxes
+    id: checked
+    attributes:
+      label: I checked
+      options:
+        - label: The teams, keeper and attack direction were correct
+        - label: The yellow pitch lines sat on the real markings
+  - type: textarea
+    id: files
+    attributes:
+      label: report.json or frame
+      description: Drag files here.

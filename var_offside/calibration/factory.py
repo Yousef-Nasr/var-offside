@@ -2,7 +2,6 @@
 Factory for creating calibration instances with auto-fallback.
 """
 
-from typing import Optional
 import numpy as np
 
 from var_offside.calibration.base import BaseCalibration, CalibrationResult

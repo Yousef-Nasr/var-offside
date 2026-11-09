@@ -7,8 +7,8 @@ of the cinematic replay, and optionally upgrades the key players to SAM 3D
 Body meshes and renders the presets again.
 
 Usage:
-    python scripts/smoke_live3d.py --image images/test7.png --no-meshes
-    python scripts/smoke_live3d.py --image images/test7.png
+    python scripts/smoke_live3d.py --image frame.png --no-meshes
+    python scripts/smoke_live3d.py --image frame.png
 """
 
 from __future__ import annotations

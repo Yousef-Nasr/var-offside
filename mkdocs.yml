@@ -1,0 +1,75 @@
+site_name: VAR-Offside
+site_description: Offside detection for football broadcast frames, with pitch calibration and a 3D view in the browser.
+site_url: https://yousef-nasr.github.io/var-offside/
+repo_url: https://github.com/Yousef-Nasr/var-offside
+repo_name: Yousef-Nasr/var-offside
+edit_uri: edit/main/docs/
+copyright: VAR-Offside is licensed under AGPL-3.0-or-later
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - content.code.copy
+    - content.action.edit
+    - search.suggest
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: indigo
+      accent: red
+      toggle:
+        icon: material/weather-night
+        name: Dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: indigo
+      accent: red
+      toggle:
+        icon: material/weather-sunny
+        name: Light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.highlight
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+
+nav:
+  - Home: index.md
+  - Getting started:
+      - Installation: getting-started/installation.md
+      - Models and weights: getting-started/models.md
+      - Quickstart: getting-started/quickstart.md
+      - Configuration: getting-started/configuration.md
+  - Guides:
+      - Web app: guide/web-app.md
+      - Command line: guide/cli.md
+      - Auto-review: guide/auto-review.md
+  - How it works:
+      - Pipeline: concepts/pipeline.md
+      - Offside rules: concepts/offside-rules.md
+      - Calibration: concepts/calibration.md
+      - 3D view and replay: concepts/3d-replay.md
+  - Reference:
+      - Python API: reference/python-api.md
+      - Web API: reference/web-api.md
+  - Development:
+      - Contributing: development/contributing.md
+      - Architecture: development/architecture.md
+      - Testing: development/testing.md
+  - Troubleshooting: troubleshooting.md
+  - About:
+      - Responsible use: about/responsible-use.md
+      - Licensing: about/licensing.md

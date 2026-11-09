@@ -2615,6 +2615,7 @@ kbd {
   font-weight: 500;
 }
 
+#clearBtn[hidden],
 .toast-link[hidden] {
   display: none !important;
 }

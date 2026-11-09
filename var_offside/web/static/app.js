@@ -138,6 +138,7 @@ const dom = {
   fileName: byId("fileName"),
   fileRes: byId("fileRes"),
   openBtn: byId("openBtn"),
+  clearBtn: byId("clearBtn"),
   primaryBtn: byId("primaryBtn"),
   arSwitchWrap: byId("arSwitchWrap"),
   arSwitch: byId("arSwitch"),
@@ -402,6 +403,11 @@ const realApi = {
     return request(`${API}/sessions`, { method: "POST", body: form });
   },
 
+  /** Delete a session and everything made from it. */
+  async deleteSession(sessionId) {
+    return request(`${API}/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+  },
+
   /** URL of one source frame. */
   frameUrl(sessionId, index) {
     return `${API}/sessions/${encodeURIComponent(sessionId)}/frame.jpg?index=${Number(index) || 0}`;
@@ -432,6 +438,32 @@ const realApi = {
   },
 
   /** Phase 2: calibration, offside line and verdict. */
+  /** Start Auto-review on the detected frame. */
+  async startAutoReview(sessionId) {
+    return request(`${API}/sessions/${encodeURIComponent(sessionId)}/auto-review`, { method: "POST" });
+  },
+
+  /** New events since `since`, and the result once the run has ended. */
+  async getAutoReview(sessionId, since = 0) {
+    return request(`${API}/sessions/${encodeURIComponent(sessionId)}/auto-review?since=${since}`);
+  },
+
+  /** Answer the question the run is waiting on. */
+  async answerAutoReview(sessionId, questionId, choice) {
+    return request(
+      `${API}/sessions/${encodeURIComponent(sessionId)}/auto-review/answers/${encodeURIComponent(questionId)}`,
+      jsonRequest("POST", { choice }),
+    );
+  },
+
+  /** Revert one correction and rerun the call. */
+  async undoAutoReview(sessionId, undoId) {
+    return request(
+      `${API}/sessions/${encodeURIComponent(sessionId)}/auto-review/decisions/${encodeURIComponent(undoId)}/undo`,
+      { method: "POST" },
+    );
+  },
+
   async analyze(sessionId, attackingSide, attackingTeam, keeper) {
     return request(
       `${API}/sessions/${encodeURIComponent(sessionId)}/analyze`,
@@ -1163,6 +1195,8 @@ function renderStates() {
   const calibrating = hasSession && state.phase === "calibrate";
 
   show(dom.dropzone, !hasSession);
+  dom.clearBtn.hidden = !hasSession;
+  dom.clearBtn.disabled = !canClear();
   show(dom.photoLayer, hasSession && !show3d && !calibrating);
   show(dom.view3dLayer, show3d);
   show(dom.calibLayer, calibrating);
@@ -1350,12 +1384,14 @@ function applyTeamColors() {
 
 let frameTimer = null;
 
-/** Reset per-file state and load the first frame. */
-function loadSession(session) {
+/** Forget everything in the page that belongs to the open file. */
+function resetFileState() {
   close3D();
   clearTimeout(frameTimer);
   frameTimer = null;
-  state.session = session;
+  clearExportToasts();
+  dom.view3dCanvas.width = dom.view3dCanvas.width;
+  state.busy = false;
   state.phase1 = null;
   state.players = [];
   state.verdict = null;
@@ -1382,13 +1418,50 @@ function loadSession(session) {
   hintHidden = false;
   dom.viewHint.classList.remove("is-hidden");
   setStatus(null);
+}
+
+/** Show a newly opened file. */
+function loadSession(session) {
+  resetFileState();
+  state.session = session;
   dom.photoImg.src = api.frameUrl(session.id, 0);
   setPhase("loaded");
 }
 
-/** Upload a file chosen or dropped by the user. */
+/** Whether the open file can be deleted now. An Auto-review run can be stopped, but Detect and Analyze can't. */
+function canStopWork() {
+  return !state.uploading && !state.playerSaving && (!state.busy || state.phase === "autoreview");
+}
+
+function canClear() {
+  return Boolean(state.session) && canStopWork();
+}
+
+/** Delete a session on the server. A failure is reported, since its data may still be there. */
+function deleteOnServer(sessionId) {
+  api.deleteSession(sessionId).catch((error) => {
+    pushNotice("Could not delete the old frame", error.message || String(error), true);
+  });
+}
+
+/** Delete the open file and everything made from it, and go back to the empty screen. */
+function clearEverything() {
+  if (!canClear()) return;
+  if (!window.confirm("Delete this frame and everything made from it, including its exports on the server?")) return;
+  const sessionId = state.session.id;
+  closeAllPopovers();
+  resetFileState();
+  state.session = null;
+  dom.photoImg.removeAttribute("src");
+  showProgress(false);
+  setPhase("empty");
+  deleteOnServer(sessionId);
+}
+
+/** Upload a file chosen or dropped by the user. The old file goes once the new one has loaded. */
 async function handleFile(file) {
-  if (!file || state.uploading || state.busy || state.playerSaving) return;
+  if (!file || !canStopWork()) return;
+  const previous = state.session ? state.session.id : null;
   closeAllPopovers();
   state.uploading = true;
   showProgress(true);
@@ -1396,6 +1469,7 @@ async function handleFile(file) {
   try {
     const session = await api.upload(file);
     loadSession(session);
+    if (previous) deleteOnServer(previous);
   } catch (error) {
     pushNotice("Could not open file", error.message || String(error), true);
   } finally {
@@ -1534,7 +1608,7 @@ async function runAutoReview() {
     state.has3d = false;
     state.view = "photo";
     setPhase("autoreview");
-    autoReview.start(sessionId);
+    autoReview.start(sessionId, started.job_id);
   } catch (error) {
     state.busy = false;
     pushNotice("Auto-review failed", error.message || String(error), true);
@@ -1606,7 +1680,7 @@ function onAutoReviewResult(result, info) {
   state.has3d = Boolean(result.verdict && result.verdict.view3d_available);
   state.view = "photo";
   state.stageVersion += 1;
-  if (reviewMissing().length) {
+  if (!result.verdict || reviewMissing().length) {
     state.verdict = null;
     state.has3d = false;
     setPhase("review");
@@ -1623,6 +1697,7 @@ function onAutoReviewByHand(result) {
     detect();
     return;
   }
+  if (result && result.reason) pushNotice("Auto-review needs you", result.reason);
   if (result) applyAutoReviewScene(result);
   state.verdict = null;
   state.has3d = false;
@@ -1648,6 +1723,7 @@ function setupAutoReview() {
       getAutoReview: (...args) => api.getAutoReview(...args),
       answerAutoReview: (...args) => api.answerAutoReview(...args),
       undoAutoReview: (...args) => api.undoAutoReview(...args),
+      cancelJob: (...args) => api.cancelJob(...args),
     },
     canvas: byId("autoReviewCanvas"),
     viewport: dom.viewport,
@@ -1683,7 +1759,7 @@ function setupAutoReview() {
 
 function renderAutoReviewSwitch() {
   dom.arSwitchWrap.hidden = !autoReviewAvailable();
-  dom.arScenario.hidden = !state.autoReviewOn || state.phase !== "loaded";
+  dom.arScenario.hidden = !state.mock || !state.autoReviewOn || state.phase !== "loaded";
   dom.arSwitch.setAttribute("aria-checked", state.autoReviewOn ? "true" : "false");
   dom.arSwitch.classList.toggle("is-on", state.autoReviewOn);
   const locked = state.busy || state.phase === "autoreview";
@@ -2956,15 +3032,29 @@ function exportFilename(kind) {
   return `var-offside-${kind}.${EXPORT_EXT[kind] || "bin"}`;
 }
 
+/** Stops polling for each export with a toast, so deleting a file can end them all. */
+const exportPollers = new Set();
+
+/** Remove every toast. A deleted file's exports and notices no longer apply. */
+function clearExportToasts() {
+  for (const stop of exportPollers) stop();
+  dom.toasts.replaceChildren();
+}
+
 /** Start an export and poll the job into a toast. */
 async function startExport(kind) {
   if (!state.session || state.phase !== "verdict") return;
+  const sessionId = state.session.id;
 
   let jobId = null;
   try {
-    const started = await api.exportSession(state.session.id, kind, viewOptions());
+    const started = await api.exportSession(sessionId, kind, viewOptions());
     jobId = started && started.job_id;
     if (!jobId) throw new Error("No job id returned");
+    if (!state.session || state.session.id !== sessionId) {
+      api.cancelJob(jobId).catch(() => {});
+      return;
+    }
   } catch (error) {
     pushNotice("Export failed", error.message || String(error), true);
     return;
@@ -2989,7 +3079,9 @@ async function startExport(kind) {
     active = false;
     if (timer) clearTimeout(timer);
     timer = null;
+    exportPollers.delete(finish);
   };
+  exportPollers.add(finish);
 
   const tick = async () => {
     if (!active) return;
@@ -3249,6 +3341,7 @@ window.__varCalibrator = calibrator;
 /** Attach every listener once. */
 function bindEvents() {
   dom.openBtn.addEventListener("click", () => dom.fileInput.click());
+  dom.clearBtn.addEventListener("click", clearEverything);
   dom.fileInput.addEventListener("change", () => {
     const file = dom.fileInput.files && dom.fileInput.files[0];
     dom.fileInput.value = "";

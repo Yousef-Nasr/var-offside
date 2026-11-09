@@ -3,7 +3,7 @@ Calibration state for one frame of a session.
 
 Holds the automatic result, the user's pins and the calibration that Analyze will
 use.  Automatic calibration runs in the background and the Calibrate screen polls
-until it is ready.  Everything here is Qt-free and has no model or OpenGL state.
+until it is ready.  Nothing here holds model or OpenGL state.
 """
 
 from __future__ import annotations

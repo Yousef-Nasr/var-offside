@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 
 MAX_IMAGE_SIDE = 1280
 JPEG_QUALITY = 85
-MAX_TOKENS = 1000
+# Includes hidden reasoning on models that reason, which alone can use a thousand tokens.
+MAX_TOKENS = 4000
 RETRY_DELAY_SECONDS = 2.0
 RETRYABLE_STATUS = frozenset({408, 429, 500, 502, 503, 504})
 
@@ -89,7 +90,29 @@ def encode_image(image: Image, max_side: int = MAX_IMAGE_SIDE) -> str:
 def _parse_json(text: str) -> Any:
     """Parse a reply, allowing for a Markdown code fence around the JSON."""
     fenced = re.fullmatch(r"\s*```(?:json)?\s*(.*?)\s*```\s*", text, flags=re.S)
-    return json.loads(fenced.group(1) if fenced else text)
+    text = fenced.group(1) if fenced else text
+    try:
+        return json.loads(text)
+    except ValueError:
+        return _last_json_object(text)
+
+
+def _last_json_object(text: str) -> Any:
+    """Some models think aloud before the JSON, so use the last complete object in the reply."""
+    decoder = json.JSONDecoder()
+    position, found = 0, None
+    while True:
+        position = text.find("{", position)
+        if position < 0:
+            break
+        try:
+            found, length = decoder.raw_decode(text[position:])
+            position += length
+        except ValueError:
+            position += 1
+    if found is None:
+        raise ValueError("No JSON object in the reply")
+    return found
 
 
 def _reply_text(payload: Dict[str, Any]) -> str:
@@ -99,6 +122,8 @@ def _reply_text(payload: Dict[str, Any]) -> str:
     choices = payload.get("choices")
     if not choices:
         raise ServiceUnavailable("OpenRouter returned no choices")
+    if choices[0].get("finish_reason") == "length":
+        raise InvalidAnswer("The reply was cut off at the token limit")
     content = (choices[0].get("message") or {}).get("content")
     if isinstance(content, list):
         content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
@@ -118,6 +143,7 @@ class OpenRouterClient:
     ) -> None:
         self.config = config
         self.usage = Usage()
+        self._refusal: Optional[RejectedByService] = None
         self._session = session or requests.Session()
         self._sleep = sleep
 
@@ -148,7 +174,14 @@ class OpenRouterClient:
         assert last_error is not None
         raise last_error
 
+    def _refuse(self, message: str) -> RejectedByService:
+        """Remember a refusal, so the run's later checks don't send more requests."""
+        self._refusal = RejectedByService(message)
+        return self._refusal
+
     def _check_limits(self) -> None:
+        if self._refusal is not None:
+            raise self._refusal
         if self.usage.calls >= self.config.max_calls:
             raise LimitReached(f"This run reached its limit of {self.config.max_calls} model calls.")
         if self.usage.cost_usd >= self.config.max_cost_usd:
@@ -171,6 +204,7 @@ class OpenRouterClient:
             "model": self.config.model,
             "temperature": 0,
             "max_tokens": MAX_TOKENS,
+            "reasoning": {"effort": "low"},
             "response_format": {"type": "json_object"},
             "usage": {"include": True},
             "messages": [
@@ -203,12 +237,16 @@ class OpenRouterClient:
         status = response.status_code
         if status in RETRYABLE_STATUS:
             raise ServiceUnavailable(f"OpenRouter returned HTTP {status}")
-        if status in (401, 403):
-            raise RejectedByService("OpenRouter rejected the API key. Check OPENROUTER_API_KEY.")
+        if status == 401:
+            raise self._refuse("OpenRouter rejected the API key. Check OPENROUTER_API_KEY.")
+        if status == 403:
+            raise self._refuse(
+                "OpenRouter refused the API key. Its spending limit may be reached, so check the key's limit and OPENROUTER_API_KEY."
+            )
         if status == 402:
-            raise RejectedByService("The OpenRouter account is out of credit.")
+            raise self._refuse("The OpenRouter account is out of credit, or the key's spending limit is reached.")
         if status >= 400:
-            raise RejectedByService(
+            raise self._refuse(
                 f"OpenRouter refused the request (HTTP {status}). Check that "
                 f"{self.config.model} exists and accepts images and JSON output."
             )

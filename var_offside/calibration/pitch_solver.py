@@ -825,18 +825,19 @@ def _side_warning(camera: Camera, width: int, height: int, attacking_side: Optio
     """A warning when the fitted end of the pitch contradicts the attack direction."""
     if attacking_side not in ("left", "right"):
         return None
-    if camera.position[1] < 0.0:
-        return "This puts the camera on the far side of the pitch. Check that the points are on the right end."
-    centre = _pixels_to_field_x(
-        camera.params(), camera, np.array([[width / 2.0, height * 0.65]])
-    )[0]
-    if not np.isfinite(centre):
+    row = height * 0.65
+    left, centre, right = _pixels_to_field_x(
+        camera.params(),
+        camera,
+        np.array([[width * 0.35, row], [width / 2.0, row], [width * 0.65, row]]),
+    )
+    if not (np.isfinite(left) and np.isfinite(centre) and np.isfinite(right)) or left == right:
         return None
-    half = FIELD_LENGTH / 2.0
-    if attacking_side == "right" and centre < half - 15.0:
-        return "This shows the left end, but the attack is to the right. Check the end of the pitch."
-    if attacking_side == "left" and centre > half + 15.0:
-        return "This shows the right end, but the attack is to the left. Check the end of the pitch."
+    # A reverse-angle camera runs pitch metres the other way on screen, so measure it.
+    screen_right_sign = 1.0 if right > left else -1.0
+    attack_sign = screen_right_sign if attacking_side == "right" else -screen_right_sign
+    if (centre - FIELD_LENGTH / 2.0) * attack_sign < -15.0:
+        return f"This shows the far end from the attack, which goes to the {attacking_side}. Check the end of the pitch."
     return None
 
 

@@ -6,12 +6,10 @@ import cv2
 import numpy as np
 from typing import List, Tuple, Optional
 
-from var_offside.detection.player_detector import PlayerDetection
 from var_offside.offside.line_calculator import (
-    OffsideLine,
     get_directional_ground_point,
 )
-from var_offside.offside.decision import OffsideResult, PlayerOffsideStatus
+from var_offside.offside.decision import OffsideResult
 from var_offside.calibration.base import CalibrationResult
 from var_offside.config import get_settings
 from var_offside.visualization.player_viz import PlayerVisualizer

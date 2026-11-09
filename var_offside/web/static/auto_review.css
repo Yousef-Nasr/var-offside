@@ -274,7 +274,9 @@
   gap: 5px;
 }
 
-.ar-list.is-running .ar-undo {
+/* No hint about the call, and no undo, until the run has finished. */
+.ar-list.is-running .ar-undo,
+.ar-list.is-running .ar-chip {
   display: none;
 }
 
@@ -293,6 +295,21 @@
 
 @media (max-width: 1240px) {
   .topbar:has(.ar-switch-wrap:not([hidden])) .phase-steps {
+    display: none;
+  }
+}
+
+/* Clear makes the buttons wider than a third of the bar, so the steps take what's left. */
+.topbar:has(#clearBtn:not([hidden])) {
+  grid-template-columns: minmax(0, auto) minmax(0, 1fr) auto;
+}
+
+.topbar:has(#clearBtn:not([hidden])) .phase-steps {
+  justify-self: center;
+}
+
+@media (max-width: 1340px) {
+  .topbar:has(#clearBtn:not([hidden])) .phase-steps {
     display: none;
   }
 }

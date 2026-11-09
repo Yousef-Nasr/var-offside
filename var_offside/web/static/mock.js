@@ -1513,10 +1513,7 @@ function arScript(kind) {
       flips_call: false,
       undo_id: "d-camera",
     },
-    check("call"),
-    { type: "line_moved", from_points: null, to_points: clone(OFFSIDE_LINE), player_id: 7 },
   ];
-  const firstCall = { type: "call_changed", from: "unknown", to: "offside", margin_m: 1.0 };
   const corrections = [
     check("players"),
     {
@@ -1528,8 +1525,6 @@ function arScript(kind) {
       flips_call: true,
       undo_id: "d-missed",
     },
-    { type: "line_moved", from_points: clone(OFFSIDE_LINE), to_points: clone(AR_SAFE_LINE), player_id: 14 },
-    { type: "call_changed", from: "offside", to: "onside", margin_m: 2.0 },
     {
       type: "box_removed",
       player_id: 30,
@@ -1560,6 +1555,9 @@ function arScript(kind) {
       undo_id: "d-referee",
     },
     check("stability"),
+    check("call"),
+    { type: "line_moved", from_points: null, to_points: clone(AR_SAFE_LINE), player_id: 14 },
+    { type: "call_changed", from: "unknown", to: "onside", margin_m: 2.0 },
     { type: "run_ended", ending: "cleared", reason: null },
   ];
 
@@ -1572,6 +1570,8 @@ function arScript(kind) {
       setKeeper,
       ...camera,
       check("stability"),
+      check("call"),
+      { type: "line_moved", from_points: null, to_points: clone(OFFSIDE_LINE), player_id: 7 },
       { type: "run_ended", ending: "too_close", reason: AR_TOO_CLOSE },
     ];
   }
@@ -1587,11 +1587,10 @@ function arScript(kind) {
       },
       { wait: true },
       ...camera,
-      firstCall,
       ...corrections,
     ];
   }
-  return [...opening, setKeeper, ...camera, firstCall, ...corrections];
+  return [...opening, setKeeper, ...camera, ...corrections];
 }
 
 /** A verdict for the scripted scene. Its numbers come from the script, not from geometry. */
@@ -1684,6 +1683,18 @@ export function createMockApi() {
     /** The health probe the app uses to decide whether a backend exists. */
     async health() {
       return { status: "ok", device: "cpu" };
+    },
+
+    /** Forget the mock's scene if this is the open session. */
+    async deleteSession(sessionId) {
+      await wait(80);
+      if (sessionId === `mock-session-${sessionCount}`) {
+        arRun = null;
+        mockApplied = null;
+        activePlayers = buildPlayers();
+        stageCache.clear();
+      }
+      return { status: "deleted" };
     },
 
     /** Pretend to upload a file and return a session descriptor. */
@@ -1880,6 +1891,7 @@ export function createMockApi() {
     async answerAutoReview(_sessionId, _questionId, choice) {
       await wait(120);
       const run = arRun;
+      if (choice === "Review by hand") return { status: "stopped" };
       if (choice === "Another player") {
         run.steps = [{ type: "run_ended", ending: "needs_answer", reason: "Mark the keeper in Review." }];
       } else if (choice === "Yes") {

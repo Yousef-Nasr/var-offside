@@ -4,7 +4,7 @@ Uses two-stage approach: detection first, then pose estimation.
 """
 
 import numpy as np
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import List, Optional, Tuple, Union
 from pathlib import Path
 
@@ -16,6 +16,19 @@ from var_offside.config import get_settings
 POSE_CROP_PAD_X = 0.25
 POSE_CROP_PAD_Y = 0.1
 POSE_CROP_SIZE = 256
+
+
+@dataclass(frozen=True)
+class BallDetection:
+    """Where the detector saw the ball. The ball is never a player."""
+    bbox: Tuple[float, float, float, float]
+    confidence: float
+
+    @property
+    def center(self) -> Tuple[float, float]:
+        """Bounding box center."""
+        x1, y1, x2, y2 = self.bbox
+        return ((x1 + x2) / 2, (y1 + y2) / 2)
 
 
 @dataclass
@@ -38,6 +51,8 @@ class PlayerDetection:
     
     # Is this player a goalkeeper?
     is_goalkeeper: bool = False
+    # The detector's own class name, as evidence only: it never sets a role by itself
+    detector_class: Optional[str] = None
     
     @property
     def center(self) -> Tuple[float, float]:
@@ -151,6 +166,7 @@ class PlayerDetector:
         )
         
         detections = []
+        self.last_ball = None
         
         for result in detection_results:
             if verbose:
@@ -179,7 +195,17 @@ class PlayerDetector:
                     cls = 0  # Default to class 0
                 
                 class_name = result.names.get(int(cls), str(int(cls))) if hasattr(result, 'names') else str(int(cls))
-                if str(class_name).strip().lower() == "ball":
+                class_name = str(class_name).strip().lower()
+                if class_name == "ball":
+                    if self.last_ball is None or box_conf > self.last_ball.confidence:
+                        self.last_ball = BallDetection(
+                            bbox=(float(x1), float(y1), float(x2), float(y2)),
+                            confidence=float(box_conf),
+                        )
+                    continue
+
+                # Keep scanning past the limit, so a later ball box is still seen.
+                if len(detections) >= self.max_players:
                     continue
 
                 if verbose:
@@ -198,7 +224,8 @@ class PlayerDetector:
                     bbox=bbox,
                     confidence=float(box_conf),
                     keypoints=None,
-                    player_id=len(detections)
+                    player_id=len(detections),
+                    detector_class=class_name,
                 )
                 
                 detections.append(detection)
@@ -206,9 +233,6 @@ class PlayerDetector:
                 if verbose:
                     print(f"[PlayerDetector]   -> Added player {len(detections)}")
                 
-                # Limit number of detections
-                if len(detections) >= self.max_players:
-                    break
         
         if verbose:
             print(f"[PlayerDetector] Stage 1 complete: {len(detections)} players detected")

@@ -1,10 +1,56 @@
-runs/
-__pycache__/
+# ---- Models and third-party code (downloaded, never committed) ----
+weights/*
+!weights/README.md
+!weights/.gitkeep
+third_party/*
+!third_party/README.md
+*.pt
+*.pth
+*.ckpt
+*.ts
+*.onnx
+*.engine
+
+# ---- Local configuration and secrets ----
+config.yaml
 .env
 .env.*
 !.env.example
-*.pt
-*.png 
+
+# ---- Outputs ----
+results/
+runs/
+*.mp4
+*.mov
+
+# ---- Media: keep broadcast frames out of the repo ----
+# Rights-cleared images go in docs/assets/ or examples/ and are added with `git add -f`.
+*.png
 *.jpg
-*.ipynb
-*.pdf
+*.jpeg
+!docs/assets/**
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# ---- Docs build ----
+site/
+
+# ---- Editors and tools ----
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.db

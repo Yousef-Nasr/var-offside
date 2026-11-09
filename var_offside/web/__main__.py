@@ -2,16 +2,19 @@
 
 Usage::
 
-    python -m var_offside.web [--host 127.0.0.1] [--port 8765] [--no-browser]
+    var-offside-web [--config config.yaml] [--host 127.0.0.1] [--port 8765] [--no-browser]
+    python -m var_offside.web ...
 
-The browser opens automatically after a short delay unless ``--no-browser`` is
-passed.
+Defaults come from the ``server`` section of ``config.yaml``; flags win. The
+browser opens automatically after a short delay unless ``--no-browser`` is
+passed or ``server.open_browser`` is false.
 """
 
 from __future__ import annotations
 
 import argparse
 import logging
+import os
 import threading
 import time
 import webbrowser
@@ -37,17 +40,32 @@ def _preload_on_render_thread() -> None:
 def main(argv: list[str] | None = None) -> None:
     """Parse CLI arguments and start uvicorn."""
     parser = argparse.ArgumentParser(
-        prog="python -m var_offside.web",
+        prog="var-offside-web",
         description="Serve the VAR offside web app.",
     )
-    parser.add_argument("--host", default="127.0.0.1", help="Bind host")
-    parser.add_argument("--port", type=int, default=8765, help="Bind port")
+    parser.add_argument(
+        "--config",
+        help="Path to a config.yaml (default: config.yaml in the project folder)",
+    )
+    parser.add_argument("--host", help="Bind host (default from config: 127.0.0.1)")
+    parser.add_argument("--port", type=int, help="Bind port (default from config: 8765)")
     parser.add_argument(
         "--no-browser",
         action="store_true",
         help="Do not open the browser on startup",
     )
     args = parser.parse_args(argv)
+
+    if args.config:
+        # Set before anything reads the settings, so every module sees it.
+        os.environ["VAR_OFFSIDE_CONFIG"] = os.path.abspath(args.config)
+
+    from var_offside.config import get_settings
+
+    settings = get_settings()
+    host = args.host or settings.server.host
+    port = args.port or settings.server.port
+    open_browser = settings.server.open_browser and not args.no_browser
 
     logging.basicConfig(
         level=logging.INFO,
@@ -62,10 +80,13 @@ def main(argv: list[str] | None = None) -> None:
             "uvicorn is required to run the web app (pip install uvicorn)"
         ) from exc
 
-    browser_host = "127.0.0.1" if args.host in ("0.0.0.0", "::") else args.host
-    url = f"http://{browser_host}:{args.port}/"
+    if settings.config_file:
+        logging.getLogger(__name__).info("Using config file %s", settings.config_file)
 
-    if not args.no_browser:
+    browser_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    url = f"http://{browser_host}:{port}/"
+
+    if open_browser:
         threading.Thread(
             target=_open_browser,
             args=(url,),
@@ -73,7 +94,7 @@ def main(argv: list[str] | None = None) -> None:
             daemon=True,
         ).start()
 
-    uvicorn.run("var_offside.web.server:app", host=args.host, port=args.port)
+    uvicorn.run("var_offside.web.server:app", host=host, port=port)
 
 
 if __name__ == "__main__":

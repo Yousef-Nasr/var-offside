@@ -31,13 +31,16 @@ const GLOW = "#3ddc84";
 const SPARK = ["#fff6c9", "#3ddc84", "#ffffff"];
 
 const CHECK_NAMES = {
+  calibration: "Fitting the camera",
   frame: "Checking the frame",
-  side: "Finding the attack direction",
+  side: "Reading the attack and direction",
   team: "Finding the attacking team",
   keeper: "Finding the keeper",
   camera: "Checking the camera",
   call: "Working out the call",
   players: "Looking for missed players",
+  false_boxes: "Checking the boxes",
+  line: "Checking the players on the line",
   teams: "Checking the teams",
   officials: "Looking for officials",
   stability: "Testing the call",
@@ -455,6 +458,7 @@ export function createAutoReview(deps) {
   let pumping = null;
   let wakeDelay = null;
   let sessionId = null;
+  let jobId = null;
   let corrections = [];
   let lastResult = null;
 
@@ -687,7 +691,7 @@ export function createAutoReview(deps) {
   function showQuestion(event) {
     fx.scanning = false;
     const player = (event.player_ids || []).map(deps.findPlayer).find(Boolean);
-    fx.spotlight = player ? player.bbox : null;
+    fx.spotlight = player ? player.bbox : event.bbox || null;
     fx.wake();
     ui.status.hidden = true;
     ui.questionText.textContent = event.text;
@@ -705,6 +709,7 @@ export function createAutoReview(deps) {
     hand.className = "btn ghost ar-hand";
     hand.textContent = "Review by hand";
     hand.addEventListener("click", () => {
+      deps.api.answerAutoReview(sessionId, event.question_id, "Review by hand").catch(() => {});
       run += 1;
       stopRun();
       deps.onReviewByHand(null);
@@ -760,7 +765,9 @@ export function createAutoReview(deps) {
         await enqueue(events, token);
         if (token !== run) return;
         if (status.status === "needs_answer") return;
-        if (status.status === "error") throw new Error(status.message || "Auto-review failed");
+        if (status.status === "error" || status.status === "cancelled") {
+          throw new Error(status.message || "Auto-review stopped");
+        }
         if (status.status === "done") {
           finish(status.result);
           return;
@@ -790,8 +797,9 @@ export function createAutoReview(deps) {
       return;
     }
     ui.panel.hidden = !panelHasItems;
-    ui.summary.textContent =
-      result.ending === "cleared" && result.stability
+    ui.summary.textContent = result.summary
+      ? result.summary
+      : result.ending === "cleared" && result.stability
         ? `${result.stability.alternatives_tested} doubts tested · ${result.stability.changed_the_call} changed the call`
         : result.reason || "";
     deps.onResult(result, { ending: result.ending });
@@ -882,6 +890,8 @@ export function createAutoReview(deps) {
 
     /** Forget any run, for example when a new file opens. */
     reset() {
+      if (active && jobId) deps.api.cancelJob(jobId).catch(() => {});
+      jobId = null;
       run += 1;
       queue = [];
       pumping = null;
@@ -896,9 +906,10 @@ export function createAutoReview(deps) {
     },
 
     /** Start following a run that the server has already begun on this frame. */
-    start(id) {
+    start(id, job) {
       this.reset();
       sessionId = id;
+      jobId = job || null;
       const token = run;
       active = true;
       instant = reducedMotion();

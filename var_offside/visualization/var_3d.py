@@ -10,7 +10,6 @@ Can run standalone:
 
 from __future__ import annotations
 
-import importlib.util
 import logging
 import math
 import os
@@ -53,52 +52,15 @@ class _CancellableWriter:
 # ---------------------------------------------------------------------------
 
 
-def _repo_root() -> Path:
-    """Project root: parent of the ``var_offside`` package."""
-    return Path(__file__).resolve().parents[2]
-
-
-def _load_sam3_body_utils_module():
-    """
-    Load ``sam3_body3d/utils.py`` as a distinct module name so it never
-    shadows or is shadowed by a third-party ``utils`` package.
-    """
-    sam3_dir = _repo_root() / "sam3_body3d"
-    utils_py = sam3_dir / "utils.py"
-    if not utils_py.is_file():
-        raise FileNotFoundError(
-            f"Expected SAM 3D Body helper at {utils_py}. "
-            "Place the sam3_body3d folder next to var_offside at the repo root."
-        )
-    mod_name = "var_offside_sam3_body3d_utils"
-    if mod_name in sys.modules:
-        return sys.modules[mod_name]
-    spec = importlib.util.spec_from_file_location(mod_name, utils_py)
-    if spec is None or spec.loader is None:
-        raise ImportError(f"Could not load spec for {utils_py}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[mod_name] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
 def _get_setup_function() -> Callable[..., Any]:
-    """Return the best available setup function.
+    """Return the SAM 3D Body setup function.
 
-    Prefers ``setup_fast_sam_3d_body`` (from sam3_body3d/utils.py) which
-    uses the Fast-SAM-3D-Body clone for ~10x speed.  Falls back to the
-    original ``setup_sam_3d_body`` if the fast variant doesn't exist.
+    It uses the Fast-SAM-3D-Body clone in ``third_party/`` when present (about
+    10x faster) and falls back to the original ``sam-3d-body`` clone.
     """
-    mod = _load_sam3_body_utils_module()
-    if hasattr(mod, "setup_fast_sam_3d_body"):
-        logger.info("Using Fast-SAM-3D-Body setup (accelerated)")
-        return mod.setup_fast_sam_3d_body
-    if hasattr(mod, "setup_sam_3d_body"):
-        logger.info("Using original SAM-3D-Body setup")
-        return mod.setup_sam_3d_body
-    raise ImportError(
-        f"{mod.__file__} has no setup function; check your sam3_body3d checkout."
-    )
+    from var_offside.visualization.sam3d_setup import setup_sam3d_estimator
+
+    return setup_sam3d_estimator
 
 
 # ---------------------------------------------------------------------------
@@ -666,10 +628,10 @@ class MeshRecovery:
 
     def __init__(
         self,
-        checkpoint_path: str = "model_sam3_3d.ckpt",
-        config_path: str = "sam3_body3d/model_config.yaml",
+        checkpoint_path: str = "sam-3d-body-dinov3/model.ckpt",
+        config_path: str = "sam-3d-body-dinov3/model_config.yaml",
         yolo_path: str = "yolo11l.pt",
-        mhr_path: str = "sam3_body3d/checkpoints/sam-3d-body-dinov3/assets/mhr_model.pt",
+        mhr_path: str = "sam-3d-body-dinov3/assets/mhr_model.pt",
         device: str = "cuda",
     ):
         self.checkpoint_path = checkpoint_path
@@ -681,49 +643,33 @@ class MeshRecovery:
         self._faces = None
 
     def _resolve_paths(self) -> Tuple[str, Optional[str], Optional[str], str]:
-        """Resolve weight paths relative to the repo root; verify checkpoint."""
-        root = _repo_root()
+        """Resolve weight paths through ``weights/``; verify the checkpoint."""
+        from var_offside.config.paths import resolve_weight, weights_dir
 
-        ckpt = self.checkpoint_path
-        if not os.path.isabs(ckpt):
-            for candidate in (root / ckpt, Path(ckpt)):
-                if candidate.is_file():
-                    ckpt = str(candidate.resolve())
-                    break
+        hint = (
+            "Download it with `hf download facebook/sam-3d-body-dinov3 "
+            f"--local-dir {weights_dir() / 'sam-3d-body-dinov3'}` "
+            "(see docs/getting-started/models.md)."
+        )
+
+        ckpt = resolve_weight(self.checkpoint_path) or ""
         if not os.path.isfile(ckpt):
             raise FileNotFoundError(
-                f"SAM-3D-Body checkpoint not found: {self.checkpoint_path!r}. "
-                f"Expected it at {root / self.checkpoint_path}. "
-                "Download 'model_sam3_3d.ckpt' and place it at the repo root "
-                "(see README / scripts/verify_setup.py)."
+                f"SAM 3D Body checkpoint not found: {self.checkpoint_path!r}. {hint}"
             )
 
-        cfg = self.config_path
-        if cfg and not os.path.isabs(cfg):
-            c2 = root / cfg
-            if c2.is_file():
-                cfg = str(c2)
-            elif not os.path.isfile(cfg):
-                cfg = str(root / "sam3_body3d" / "model_config.yaml")
+        cfg = resolve_weight(self.config_path) if self.config_path else None
+        if not (cfg and os.path.isfile(cfg)):
+            # The Hugging Face download keeps model_config.yaml next to model.ckpt.
+            cfg = os.path.join(os.path.dirname(ckpt), "model_config.yaml")
 
-        yolo = self.yolo_path
-        if yolo and not os.path.isabs(yolo):
-            y2 = root / yolo
-            if y2.is_file():
-                yolo = str(y2)
+        yolo = resolve_weight(self.yolo_path) if self.yolo_path else None
 
-        mhr = self.mhr_path
-        if mhr:
-            if not os.path.isabs(mhr):
-                m2 = root / mhr
-                if m2.is_file():
-                    mhr = str(m2)
-            if not os.path.isfile(mhr):
-                raise FileNotFoundError(
-                    f"SAM 3D Body MHR model not found: {self.mhr_path!r}. "
-                    f"Expected it at {root / self.mhr_path}. "
-                    "Download it or set settings.var_3d.sam3d_mhr."
-                )
+        mhr = resolve_weight(self.mhr_path) if self.mhr_path else self.mhr_path
+        if mhr and not os.path.isfile(mhr):
+            raise FileNotFoundError(
+                f"SAM 3D Body MHR model not found: {self.mhr_path!r}. {hint}"
+            )
 
         return (
             ckpt,

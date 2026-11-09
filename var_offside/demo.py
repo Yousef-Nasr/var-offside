@@ -1,13 +1,19 @@
 """
-Demo script for the VAR line analysis system.
+Command-line offside check on one frame.
 
 Usage:
-    python -m var_offside.demo --image images/test9.png
-    python -m var_offside.demo --image images/test9.png --method vanishing_point
-    python -m var_offside.demo --image images/test9.png --attacking-side left
+    var-offside --image frame.png --attacking-side left --attacking-team 1
+    var-offside --image frame.png --attacking-side right --attacking-team 2 --method vanishing_point
+    python -m var_offside.demo ...   (same thing)
+
+Teams are clustered by kit colour into team 1 and team 2. Run once with
+``--debug`` to see which team got which number, then pass the attackers'
+number with ``--attacking-team``.
 """
 
 import argparse
+import os
+
 import cv2
 from pathlib import Path
 
@@ -36,7 +42,22 @@ def parse_args():
         type=str,
         choices=["left", "right"],
         required=True,
-        help="Attacking direction.",
+        help="Direction the attacking team is playing towards in the image.",
+    )
+
+    parser.add_argument(
+        "--attacking-team",
+        type=int,
+        choices=[1, 2],
+        required=True,
+        help="Which kit cluster is attacking (1 or 2).",
+    )
+
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to a config.yaml (default: config.yaml in the project folder)",
     )
 
     parser.add_argument(
@@ -67,6 +88,9 @@ def main():
     """Main demo function."""
     args = parse_args()
 
+    if args.config:
+        os.environ["VAR_OFFSIDE_CONFIG"] = os.path.abspath(args.config)
+
     # Check input exists
     if not Path(args.image).exists():
         print(f"Error: Image not found: {args.image}")
@@ -89,6 +113,7 @@ def main():
     result = pipeline.analyze(
         args.image,
         attacking_side=args.attacking_side,
+        attacking_team=args.attacking_team,
         generate_visualization=True,
         save_result=True,
         output_path=args.output,

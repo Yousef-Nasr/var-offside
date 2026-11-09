@@ -60,7 +60,10 @@ def _backproject(homography: np.ndarray, pixel_x: float, pixel_y: float):
 def main() -> int:
     from var_offside.calibration.pnl_calibration import PnLCalibration
 
-    image_arg = sys.argv[1] if len(sys.argv) > 1 else "images/test7.png"
+    if len(sys.argv) < 2:
+        print(__doc__)
+        return 2
+    image_arg = sys.argv[1]
     image_path = _resolve_image(image_arg)
     image = cv2.imread(str(image_path))
     if image is None:

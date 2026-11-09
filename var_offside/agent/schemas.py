@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Generic, List, Literal, Optional, Tuple, TypeVar, Union
+from typing import Annotated, Dict, Generic, List, Literal, Optional, Tuple, TypeVar, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -50,6 +50,129 @@ class FrameCheck(StrictModel):
     ]
     usable: Literal["yes", "no", "cannot_tell"]
     problems: List[str] = Field(default_factory=list)
+
+
+class UnnumberedPerson(StrictModel):
+    grid_cell: str
+    partly_hidden: bool = False
+    same_kit_as: Optional[int] = None
+
+
+class MissedPlayersCheck(StrictModel):
+    unnumbered_people: List[UnnumberedPerson] = Field(default_factory=list)
+
+
+class NotAPlayer(StrictModel):
+    id: int
+    what: str = ""
+
+
+class PersonBox(StrictModel):
+    """One person, with Gemini's native box format: [ymin, xmin, ymax, xmax], each 0 to 1000."""
+
+    box_2d: Tuple[int, int, int, int]
+    kind: Literal["player", "goalkeeper", "official", "other"] = "player"
+
+    @model_validator(mode="after")
+    def _box_is_on_the_image(self) -> "PersonBox":
+        ymin, xmin, ymax, xmax = self.box_2d
+        if not all(0 <= value <= 1000 for value in self.box_2d):
+            raise ValueError("box_2d values must be from 0 to 1000")
+        if ymin >= ymax or xmin >= xmax:
+            raise ValueError("box_2d must be [ymin, xmin, ymax, xmax] with a positive size")
+        return self
+
+
+class PeopleBoxesCheck(StrictModel):
+    """Answer for the people-detector test: a box for each person it reports."""
+
+    people: List[PersonBox] = Field(default_factory=list)
+
+
+class FalseBoxesCheck(StrictModel):
+    not_players: List[NotAPlayer] = Field(default_factory=list)
+    duplicates: List[Tuple[int, int]] = Field(default_factory=list)
+
+
+class KitMismatch(StrictModel):
+    id: int
+    matches: Literal["group_1", "group_2", "neither"]
+
+
+class KitsCheck(StrictModel):
+    kits: Dict[Literal["group_1", "group_2"], str]
+    mismatches: List[KitMismatch] = Field(default_factory=list)
+    unclear_ids: List[int] = Field(default_factory=list)
+
+
+class PlayCheck(StrictModel):
+    """Answer for the marked-up frame: which boxes are attacking, and towards which side."""
+
+    attacking_team: Literal["A", "B", "cannot_tell"]
+    attacked_goal_side: Literal["left", "right", "cannot_tell"]
+    ball_holder_id: Optional[int] = None
+    reason: str = ""
+
+
+# SideCheck and AttackingTeamCheck are only used by scripts/model_test.py now.
+class SideEvidence(StrictModel):
+    type: Literal["goal_in_view", "run_direction", "defensive_line_shape", "keeper_position"]
+    side: Literal["left", "right"]
+
+
+class SideCheck(StrictModel):
+    attacked_goal_side: Literal["left", "right", "cannot_tell"]
+    items: List[SideEvidence] = Field(default_factory=list)
+
+
+class TeamEvidence(StrictModel):
+    type: Literal["ball_possession", "defensive_line_shape"]
+    attacking: Literal["group_1", "group_2"]
+
+
+class AttackingTeamCheck(StrictModel):
+    ball_holder_id: Optional[int] = None
+    attacking_team: Literal["group_1", "group_2", "cannot_tell"]
+    items: List[TeamEvidence] = Field(default_factory=list)
+
+
+class KeeperCheck(StrictModel):
+    state: Literal["in_frame", "not_in_frame", "cannot_tell"]
+    keeper_id: Optional[int] = None
+    kit: str = ""
+
+
+class PersonRole(StrictModel):
+    id: int
+    role: Literal["player", "goalkeeper", "referee", "assistant_referee", "staff_or_other"]
+    kit: str = ""
+
+
+class OfficialsCheck(StrictModel):
+    people: List[PersonRole] = Field(default_factory=list)
+
+
+class KeyPlayer(StrictModel):
+    id: int
+    hidden_parts: List[str] = Field(default_factory=list)
+    cut_off_by_frame: bool = False
+    arm_reaches_furthest: bool = False
+    person_behind: bool = False
+
+
+class KeyPlayersCheck(StrictModel):
+    players: List[KeyPlayer] = Field(default_factory=list)
+
+
+class CameraLine(StrictModel):
+    name: str
+    fit: Literal["on", "off", "not_visible"]
+    move: Optional[Literal["left", "right", "up", "down"]] = None
+
+
+class CameraCheck(StrictModel):
+    lines: List[CameraLine] = Field(default_factory=list)
+    overall: Literal["good", "some_off", "bad", "cannot_tell"]
 
 
 # ---------------------------------------------------------------------------
@@ -115,6 +238,10 @@ class AttackingTeamSet(Correction):
     team: Literal[1, 2]
 
 
+class KeeperNotInFrame(Correction):
+    type: Literal["keeper_not_in_frame"] = "keeper_not_in_frame"
+
+
 class CameraRefined(Correction):
     type: Literal["camera_refined"] = "camera_refined"
     from_lines: List[List[Point]] = Field(default_factory=list)
@@ -141,6 +268,7 @@ class QuestionAsked(EventBase):
     text: str
     player_ids: List[int] = Field(default_factory=list)
     choices: List[str]
+    bbox: Optional[BBox] = None  # The area to look at, when no player has a box yet.
 
 
 class RunEnded(EventBase):
@@ -160,6 +288,7 @@ Event = Annotated[
         RoleChanged,
         SideSet,
         AttackingTeamSet,
+        KeeperNotInFrame,
         CameraRefined,
         LineMoved,
         CallChanged,

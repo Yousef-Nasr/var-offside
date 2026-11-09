@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional, List, Tuple, Union
+from typing import Optional, List, Union
 
 from var_offside.config import get_settings
 from var_offside.detection import PlayerDetector, PlayerDetection, GoalkeeperFilter
@@ -36,6 +36,12 @@ class AnalysisResult:
 
     # Detection results
     detections: List[PlayerDetection] = field(default_factory=list)
+
+    # Where the detector saw the ball, if it did (a BallDetection)
+    ball: Optional[object] = None
+
+    # The next id for an added player; ids are never reused within a detection
+    next_player_id: int = 0
 
     # Team assignment
     team_result: Optional[TeamAssignmentResult] = None

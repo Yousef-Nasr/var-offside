@@ -1,9 +1,8 @@
 """
 Background export jobs with progress and cancellation.
 
-The desktop app renders 3D replays in a ``QThread``
-(:mod:`var_offside.app.var3d_worker`).  The web app uses plain daemon threads
-instead and exposes their state over ``/api/jobs/{id}``.  Cancellation reuses
+Exports run on plain daemon threads, and their state is exposed over
+``/api/jobs/{id}``.  Cancellation reuses
 the ``should_stop`` callables accepted by the 3D render entry points.
 
 Exports are written to ``get_settings().output_dir`` and served by
@@ -40,6 +39,8 @@ EXPORT_WIDTH = 1280
 EXPORT_HEIGHT = 720
 
 JOB_KINDS = ("image", "replay", "birdseye", "debug", "report")
+# Background work with no output file, which the export route can't start.
+TASK_KINDS = ("auto_review",)
 TERMINAL_STATUSES = frozenset({"done", "error", "cancelled"})
 
 
@@ -221,6 +222,7 @@ class Job:
     file_name: Optional[str] = None
     error: Optional[str] = None
     options: Optional[Dict[str, bool]] = None
+    session_id: Optional[str] = None
     cancel_event: threading.Event = field(default_factory=threading.Event)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -272,7 +274,7 @@ class JobManager:
         if kind not in JOB_KINDS:
             raise ValueError(f"Unknown export kind: {kind}")
 
-        job = Job(id=uuid.uuid4().hex, kind=kind, options=options)
+        job = Job(id=uuid.uuid4().hex, kind=kind, options=options, session_id=session_id)
         with self._lock:
             self._jobs[job.id] = job
 
@@ -284,6 +286,48 @@ class JobManager:
         )
         thread.start()
         return job
+
+    def start_task(self, kind: str, work: Callable[[Job], None], session_id: Optional[str] = None) -> Job:
+        """Run ``work(job)`` in a daemon thread, outside the render thread.
+
+        ``work`` reports through :meth:`report` and should stop early once
+        ``job.cancel_event`` is set.
+
+        Raises:
+            ValueError: If ``kind`` isn't one of :data:`TASK_KINDS`.
+        """
+        if kind not in TASK_KINDS:
+            raise ValueError(f"Unknown task kind: {kind}")
+
+        job = Job(id=uuid.uuid4().hex, kind=kind, session_id=session_id)
+        with self._lock:
+            self._jobs[job.id] = job
+        threading.Thread(
+            target=self._run_task,
+            args=(job, work),
+            name=f"var-task-{kind}-{job.id[:8]}",
+            daemon=True,
+        ).start()
+        return job
+
+    def report(self, job: Job, progress: int, message: str) -> None:
+        """Update a running task's progress."""
+        self._update(job, progress=progress, message=message)
+
+    def _run_task(self, job: Job, work: Callable[[Job], None]) -> None:
+        """Execute one task; never raises out of the thread."""
+        try:
+            work(job)
+            if job.cancel_event.is_set():
+                self._mark_cancelled(job, None)
+            else:
+                self._update(job, status="done", progress=100, message="Done")
+        except Exception as exc:  # noqa: BLE001 - report through job status
+            logger.exception("Task %s (%s) failed", job.id, job.kind)
+            if job.cancel_event.is_set():
+                self._mark_cancelled(job, None)
+            else:
+                self._update(job, status="error", message=str(exc), error=str(exc))
 
     def get(self, job_id: str) -> Optional[Job]:
         """Return a job by id, or ``None`` when unknown."""
@@ -301,6 +345,30 @@ class JobManager:
                 job.status = "cancelled"
                 job.message = "Cancelled"
             return job
+
+    def delete_for_session(self, session_id: str) -> None:
+        """Stop a session's jobs and delete its export files.
+
+        A job still writing can hold its file open. It's cancelled here, and it removes
+        the file itself when it stops.
+        """
+        with self._lock:
+            owned = [job for job in self._jobs.values() if job.session_id == session_id]
+            for job in owned:
+                if job.status not in TERMINAL_STATUSES:
+                    job.cancel_event.set()
+                    job.status = "cancelled"
+                    job.message = "Cancelled"
+                del self._jobs[job.id]
+                self._files.discard(job.file_name)
+        for job in owned:
+            if job.kind not in _EXTENSIONS:
+                continue
+            path = _output_dir() / self._file_name(job, session_id)
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as exc:
+                logger.info("Export %s will be removed when its job stops: %s", path, exc)
 
     # -- file serving ------------------------------------------------------
 

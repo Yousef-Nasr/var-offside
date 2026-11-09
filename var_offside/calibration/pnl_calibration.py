@@ -7,7 +7,7 @@ Provides camera parameters and homography for projecting world->image coordinate
 import sys
 import numpy as np
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict
 import cv2
 import torch
 import torchvision.transforms as T
@@ -16,6 +16,7 @@ from PIL import Image
 
 from var_offside.calibration.base import BaseCalibration, CalibrationResult
 from var_offside.config import get_settings
+from var_offside.config.paths import third_party_dir
 
 
 class PnLCalibration(BaseCalibration):
@@ -49,13 +50,13 @@ class PnLCalibration(BaseCalibration):
         """
         settings = get_settings()
 
-        # Determine PnLCalib path
-        self.pnl_path = Path("PnLCalib")
+        # PnLCalib's code is an upstream clone in third_party/ (GPL-2.0, not
+        # bundled); its weights live in weights/pnlcalib/. Both are resolved
+        # from the project home, never from the current working directory.
+        self.pnl_path = third_party_dir("PnLCalib")
 
-        self.weights_kp = weights_keypoints or str(self.pnl_path / "weights" / "SV_kp")
-        self.weights_lines = weights_lines or str(
-            self.pnl_path / "weights" / "SV_lines"
-        )
+        self.weights_kp = weights_keypoints or settings.models.pnl_keypoints
+        self.weights_lines = weights_lines or settings.models.pnl_lines
         self.use_pnl_refine = use_pnl_refine
         self.kp_threshold = kp_threshold
         self.line_threshold = line_threshold
@@ -99,7 +100,7 @@ class PnLCalibration(BaseCalibration):
             import yaml
             from model.cls_hrnet import get_cls_net
             from model.cls_hrnet_l import get_cls_net as get_cls_net_l
-            from utils.utils_calib import FramebyFrameCalib
+            from utils.utils_calib import FramebyFrameCalib  # noqa: F401 - fail early if PnLCalib is incomplete
 
             # Load keypoint model config and weights
             cfg_path = self.pnl_path / "config" / "hrnetv2_w48.yaml"
