@@ -23,6 +23,8 @@ First public release.
 
 ### Fixed
 
+- The web server accepted uploads of any size and type. It now refuses files over `server.max_upload_mb` (500 MB by default) with HTTP 413, checking the Content-Length before the body is read, and anything that isn't an image or video with HTTP 415.
+
 - Auto-review no longer clears a call with the wrong attacking team when the keeper was grouped with the attackers. Likely keepers get no team letter in the image sent to the model, the team swap is tested as a doubt, and the run asks when it would change the call. `flips_call` on the team decision is now measured once the keeper is known.
 - The replay caption showed a different margin from the verdict panel (1.17 m against 1.26 m) because it measured the arm-free body mesh again. The caption and the live 3D label now show the panel's number, and the label no longer shows a negative distance on reverse-angle cameras.
 

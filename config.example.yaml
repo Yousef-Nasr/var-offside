@@ -21,6 +21,7 @@ server:
   host: 127.0.0.1        # 0.0.0.0 exposes the app, which has no login, to your network
   port: 8765
   open_browser: true
+  max_upload_mb: 500     # larger uploads are refused (HTTP 413)
 
 # Model files. Only set these if your files are somewhere other than the
 # standard layout in docs/getting-started/models.md. A bare name is looked up in

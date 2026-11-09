@@ -31,6 +31,8 @@ The server window logs every error, so look there next.
 | What you see | Likely cause | Fix |
 |---|---|---|
 | The page looks old or a button is missing | Cached files | Hard refresh (Ctrl+F5, or Cmd+Shift+R) |
+| `413` or "larger than the upload limit" | The file is over `server.max_upload_mb` (500 MB) | Use a shorter clip or one frame, or raise the limit in `config.yaml` |
+| `415` or "can't be opened" | Not an image or video, or a damaged file | Use PNG, JPG, BMP, WebP, TIFF, MP4, MOV, M4V, AVI, MKV or WebM |
 | A **Mock data** badge in the top bar | The page can't reach the server, or the address has `?mock=1` | Check the server is up, remove `?mock=1`, reload |
 | Black 3D view, or the view disconnects | The renderer hit a problem | Click **Reconnect**; if that fails, restart the server |
 | Video won't play in the browser | ffmpeg wasn't found, so the file stayed in an older format | Install ffmpeg on PATH, or `pip install imageio-ffmpeg` |

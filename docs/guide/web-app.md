@@ -46,7 +46,7 @@ The steps along the top of the page show where you are. **F5** always runs the m
 
 ### 1. Load
 
-Drop a photo or clip on the page, or press **Ctrl+O**. Accepted files include PNG, JPG, MP4 and MOV. For a clip, move the timeline to the moment of the pass.
+Drop a photo or clip on the page, or press **Ctrl+O**. Accepted files are images (PNG, JPG, BMP, WebP, TIFF) and videos (MP4, MOV, M4V, AVI, MKV, WebM), up to 500 MB. Change the limit with `server.max_upload_mb` in `config.yaml`. For a clip, move the timeline to the moment of the pass.
 
 ### 2. Detect
 

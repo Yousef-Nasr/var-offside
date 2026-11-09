@@ -35,7 +35,7 @@ var-offside --config stadium-cam.yaml --image frame.png --attacking-side left --
 |---|---|
 | `device` | `auto`, `cuda`, `cuda:1` or `cpu`. `auto` uses CUDA when available |
 | `output_dir` | Where exports are written. Relative to the project folder |
-| `server` | Web app `host`, `port` and `open_browser` |
+| `server` | Web app `host`, `port`, `open_browser` and `max_upload_mb` (the upload size limit) |
 | `models` | Paths to detection and calibration weights |
 | `detection` | Detector confidence and IoU thresholds, minimum player height, maximum players |
 | `pose` | Minimum keypoint confidence |

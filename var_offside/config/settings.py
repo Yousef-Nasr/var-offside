@@ -198,6 +198,7 @@ class ServerConfig:
     host: str = "127.0.0.1"  # 0.0.0.0 exposes the app, which has no login, to your network
     port: int = 8765
     open_browser: bool = True
+    max_upload_mb: int = 500  # larger uploads get HTTP 413
 
 
 def _auto_device() -> str:

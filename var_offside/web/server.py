@@ -22,8 +22,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import cv2
 import numpy as np
-from fastapi import FastAPI, File, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
@@ -67,6 +67,71 @@ app = FastAPI(
     description="Browser front end for the VAR offside pipeline.",
 )
 app.include_router(auto_review_router)
+
+
+# ---------------------------------------------------------------------------
+# Upload limits
+# ---------------------------------------------------------------------------
+
+IMAGE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"})
+VIDEO_SUFFIXES = frozenset({".mp4", ".mov", ".m4v", ".avi", ".mkv", ".webm"})
+_UPLOAD_CHUNK = 1 << 20
+# Room for the multipart headers around the file itself.
+_MULTIPART_SLACK = 64 * 1024
+
+
+def _max_upload_mb() -> float:
+    server = getattr(get_settings(), "server", None)
+    return float(getattr(server, "max_upload_mb", 500))
+
+
+def _too_large_detail() -> str:
+    return (
+        f"The file is larger than the {_max_upload_mb():g} MB upload limit. "
+        "Use a shorter clip or a single frame, or raise server.max_upload_mb in config.yaml."
+    )
+
+
+def _unsupported_detail(suffix: str) -> str:
+    shown = f"'{suffix}' files" if suffix else "Files without an extension"
+    return (
+        f"{shown} can't be opened. Upload an image (PNG, JPG, BMP, WebP, TIFF) "
+        "or a video (MP4, MOV, M4V, AVI, MKV, WebM)."
+    )
+
+
+def _is_supported_upload(filename: str, content_type: Optional[str]) -> bool:
+    suffix = Path(filename).suffix.lower()
+    if suffix:
+        return suffix in IMAGE_SUFFIXES or suffix in VIDEO_SUFFIXES
+    return (content_type or "").split("/")[0] in ("image", "video")
+
+
+@app.middleware("http")
+async def _reject_oversized_uploads(request: Request, call_next):
+    """Refuse an upload by its Content-Length before the body is read to disk."""
+    if request.method == "POST" and request.url.path == "/api/sessions":
+        length = request.headers.get("content-length")
+        limit = _max_upload_mb() * 1024 * 1024 + _MULTIPART_SLACK
+        if length is not None and length.isdigit() and int(length) > limit:
+            return JSONResponse(status_code=413, content={"detail": _too_large_detail()})
+    return await call_next(request)
+
+
+async def _read_upload(file: UploadFile) -> bytes:
+    """Read the upload in chunks, stopping as soon as it passes the size limit."""
+    limit = _max_upload_mb() * 1024 * 1024
+    chunks: List[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(_UPLOAD_CHUNK)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > limit:
+            raise HTTPException(status_code=413, detail=_too_large_detail())
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 # ---------------------------------------------------------------------------
@@ -294,12 +359,22 @@ def health() -> Dict[str, str]:
 
 @app.post("/api/sessions")
 async def create_session(file: UploadFile = File(...)) -> Dict[str, Any]:
-    """Upload an image or video and create an in-memory session."""
+    """Upload an image or video and create an in-memory session.
+
+    413 when the file passes ``server.max_upload_mb``; 415 when it isn't an
+    image or video, by extension or by content.
+    """
     if not file.filename:
         raise HTTPException(status_code=400, detail="No file was uploaded")
+    if not _is_supported_upload(file.filename, file.content_type):
+        raise HTTPException(
+            status_code=415, detail=_unsupported_detail(Path(file.filename).suffix.lower())
+        )
+    data = await _read_upload(file)
     try:
-        data = await file.read()
         session = sessions.store.create(file.filename, data)
+    except sessions.UnsupportedMedia as exc:
+        raise HTTPException(status_code=415, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001 - unexpected upload failure

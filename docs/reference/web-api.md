@@ -46,7 +46,7 @@ Image coordinates are pixels of the original frame.
 | Method + path | Body | Returns |
 |---|---|---|
 | `GET /health` | – | `{"status":"ok","device":"cuda"\|"cpu"}` |
-| `POST /sessions` | multipart `file` (image or video) | `{"id","kind":"image"\|"video","width","height","frame_count"?, "fps"?, "filename"}` |
+| `POST /sessions` | multipart `file` (image or video, up to `server.max_upload_mb`; 413 if larger, 415 if not an image or video) | `{"id","kind":"image"\|"video","width","height","frame_count"?, "fps"?, "filename"}` |
 | `GET /sessions/{id}/frame.jpg?index=N` | – | JPEG of frame N (images: N ignored) |
 | `DELETE /sessions/{id}` | – | `{"status":"deleted"}`. Stops its runs and exports, and deletes the uploaded file, results, body meshes and export files. 404 if unknown |
 | `POST /sessions/{id}/select-frame` | `{"index": N}` | `{"index": N}` — the frame later phases analyse (default 0) |

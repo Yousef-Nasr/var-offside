@@ -219,6 +219,10 @@ class Session:
             logger.warning("Could not delete %s: %s", self.path, exc)
 
 
+class UnsupportedMedia(ValueError):
+    """The uploaded bytes are neither a decodable image nor a readable video."""
+
+
 class SessionStore:
     """Thread-safe, in-memory ``id -> Session`` registry."""
 
@@ -285,8 +289,8 @@ class SessionStore:
                     target.unlink()
                 except OSError:
                     pass
-                raise ValueError(
-                    "Uploaded file is not a supported image or video"
+                raise UnsupportedMedia(
+                    "The file isn't an image or video this app can read"
                 ) from None
             session = Session(
                 id=session_id,
