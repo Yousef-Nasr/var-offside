@@ -85,6 +85,34 @@ The models aren't in git. `scripts/download_weights.py` puts them in [`weights/`
 
 Until the SAM 3D Body checkpoint is in place, the 3D view uses stand-in players. **[Models and weights](docs/getting-started/models.md)** explains where to download each file and where to put it.
 
+## Auto-review agent (optional)
+
+Auto-review runs the review steps for you. A vision language model checks the players, teams, attack direction, keeper and camera fit. The agent applies each clear correction and plays it on the photo with **Undo**, and asks you only when it can't tell. It's off by default, and the rest of the app works without it.
+
+It calls the model through [OpenRouter](https://openrouter.ai), so you need your own API key:
+
+1. Get a key at <https://openrouter.ai/keys>.
+2. Copy the example settings file:
+
+    ```bash
+    cp var_offside/.env.example var_offside/.env      # Windows: copy var_offside\.env.example var_offside\.env
+    ```
+
+3. Put your key in **`var_offside/.env`**:
+
+    ```ini
+    OPENROUTER_API_KEY="sk-or-v1-..."
+    OPENROUTER_MODEL_ID="google/gemini-3.8-flash"   # any OpenRouter model that accepts images and JSON
+    OPENROUTER_MAX_COST_USD=0.50                    # each run stops at this cost...
+    OPENROUTER_MAX_CALLS=20                         # ...or after this many calls
+    ```
+
+4. Restart `var-offside-web`, turn on the **Auto-review** switch next to the main button, and press **Auto-review**.
+
+`var_offside/.env` is ignored by git, so your key stays on your machine. You can also set the same names as environment variables, which take priority over the file. A run makes about 10 model calls.
+
+> **Your frames leave your machine.** With Auto-review on, the frame and player crops are sent to OpenRouter and the model provider. Check that against the rights to your footage. Accuracy is still largely unmeasured, so check every result. See the [Auto-review guide](docs/guide/auto-review.md).
+
 ## Configuration
 
 Everything works with the defaults. To change them, `cp config.example.yaml config.yaml` and edit. See [Configuration](docs/getting-started/configuration.md).
